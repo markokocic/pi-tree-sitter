@@ -396,7 +396,7 @@ async function validateContent(path: string, content: string): Promise<string | 
     return null;
   }
 
-  // Delimiter-balance fallback (only for languages without WASM grammar)
+  // Delimiter-balance scanner (only for Lisp-like languages without WASM grammars)
   const rules = ext ? BALANCE_RULES[ext] : undefined;
   if (rules) {
     const err = checkDelimiterBalance(path, content, rules);
