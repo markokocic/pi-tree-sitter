@@ -16,7 +16,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
-import { createRequire } from "node:module";
 import { Parser, Language, type Node, type Tree } from "web-tree-sitter";
 
 // ── Grammar map ──────────────────────────────────────────────────────────
@@ -64,47 +63,42 @@ const LANGUAGE_MAP: Record<string, GrammarEntry> = {
   ".zig":  { pkg: "@tree-sitter-grammars/tree-sitter-zig", wasm: "tree-sitter-zig.wasm" },
 };
 
-// ── Grammar cache (hybrid: local → disk cache → CDN) ─────────────────────
+// ── Grammar cache (CDN → disk cache) ────────────────────────────────────
+// Grammar packages (tree-sitter-*) are not npm dependencies — they bundle
+// native C addons that fail to build on platforms without gyp (Android,
+// etc.). WASM files are fetched from CDN on first use and cached to disk.
 
 const WASM_CDN = "https://cdn.jsdelivr.net/npm";
 const CACHE_DIR = resolve(homedir(), ".cache", "pi-tree-sitter");
 
-const require_ = createRequire(import.meta.url);
 const grammarCache = new Map<string, Language | null>();
 
-/** Resolve a WASM file: local node_modules → disk cache → CDN fetch. */
+/** Resolve a WASM file: disk cache → CDN fetch. */
 async function loadGrammar(entry: GrammarEntry): Promise<Language | null> {
   const key = `${entry.pkg}/${entry.wasm}`;
   const cached = grammarCache.get(key);
   if (cached !== undefined) return cached;
 
-  let wasmBytes: Buffer | Uint8Array | null = null;
+  let wasmBytes: Uint8Array | null = null;
 
-  // 1. Local node_modules (zero latency)
+  // 1. Persistent disk cache (offline reuse, zero latency)
+  const cachePath = resolve(CACHE_DIR, entry.pkg, entry.wasm);
   try {
-    const wasmPath = require_.resolve(key);
-    wasmBytes = await readFile(wasmPath);
+    wasmBytes = new Uint8Array(await readFile(cachePath));
   } catch {
-    // 2. Persistent disk cache (offline reuse)
-    const cachePath = resolve(CACHE_DIR, entry.pkg, entry.wasm);
+    // 2. CDN fetch (always works, no npm dependency)
     try {
-      wasmBytes = await readFile(cachePath);
+      const url = `${WASM_CDN}/${key}`;
+      console.log(`[pi-tree-sitter] downloading ${key} from CDN...`);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      wasmBytes = new Uint8Array(await res.arrayBuffer());
+      console.log(`[pi-tree-sitter] ${key} downloaded (${(wasmBytes.length / 1024).toFixed(0)} KB)`);
+      // Persist to disk cache for next time
+      await mkdir(dirname(cachePath), { recursive: true });
+      await writeFile(cachePath, Buffer.from(wasmBytes));
     } catch {
-      // 3. CDN fetch (always works, no npm dependency)
-      try {
-        const url = `${WASM_CDN}/${key}`;
-        console.log(`[pi-tree-sitter] downloading ${key} from CDN...`);
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        wasmBytes = new Uint8Array(await res.arrayBuffer());
-        console.log(`[pi-tree-sitter] ${key} downloaded (${(wasmBytes.length / 1024).toFixed(0)} KB)`);
-        // Persist to disk cache for next time
-        await mkdir(dirname(cachePath), { recursive: true });
-        await writeFile(cachePath, wasmBytes);
-      } catch {
-        console.log(`[pi-tree-sitter] failed to download ${key}, skipping validation`);
-        // All sources exhausted
-      }
+      console.log(`[pi-tree-sitter] failed to download ${key}, skipping validation`);
     }
   }
 

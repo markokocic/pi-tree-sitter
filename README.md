@@ -70,8 +70,8 @@ pi -e ./path/to/pi-tree-sitter
 Languages marked with 🔶 use a comment/string-aware delimiter-balance scanner
 as a fallback (no standalone WASM grammar available on npm).
 
-WASM grammars are loaded on first use via a hybrid strategy:
-local `node_modules` → disk cache (`~/.cache/pi-tree-sitter/`) → CDN.
+WASM grammars are fetched from CDN on first use and cached to
+disk (`~/.cache/pi-tree-sitter/`) for subsequent offline reuse.
 No explicit `npm install` of individual grammar packages is required.
 
 ## How it works
