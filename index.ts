@@ -16,7 +16,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createRequire } from "node:module";
-import { Parser, Language, type Node } from "web-tree-sitter";
+import { Parser, Language, type Node, type Tree } from "web-tree-sitter";
 
 const require = createRequire(import.meta.url);
 
@@ -54,16 +54,6 @@ const LANGUAGE_MAP: Record<string, GrammarEntry> = {
   ".bash": { pkg: "tree-sitter-bash", wasm: "tree-sitter-bash.wasm" },
 };
 
-// Languages without a WASM grammar get the delimiter-balance fallback.
-const BALANCE_LANGS = new Set([
-  ".clj", ".cljs", ".cljc", ".cljd", ".edn", ".bb",
-  ".fnl",
-  ".janet", ".jdn",
-  ".scm", ".ss", ".rkt",
-  ".lisp", ".lsp", ".cl",
-  ".el",
-]);
-
 // ── Grammar cache ────────────────────────────────────────────────────────
 
 const grammarCache = new Map<string, Language | null>();
@@ -90,7 +80,7 @@ async function loadGrammar(entry: GrammarEntry): Promise<Language | null> {
 const MAX_ERRORS = 10;
 
 /** Collect ERROR/MISSING nodes from a syntax tree, capped at MAX_ERRORS. */
-function collectErrors(tree: import("web-tree-sitter").Tree, source: string): string[] {
+function collectErrors(tree: Tree, source: string): string[] {
   const errors: string[] = [];
   const stack: Node[] = [tree.rootNode];
 
@@ -131,15 +121,16 @@ function collectErrors(tree: import("web-tree-sitter").Tree, source: string): st
  * we compute line numbers inline for human-readable messages.
  */
 interface LexRules {
-  lineComment: string | null;       // e.g. ";"
-  blockComment: [string, string] | null;  // e.g. ["#|", "|#"]
+  lineComment: string | null;              // e.g. ";"
+  blockComment: [string, string] | null;   // e.g. ["#|", "|#"]
   nestedBlock: boolean;
   backtickLongString: boolean;
+  charLiteral: "?" | null;                 // e.g. Elisp uses ?x for char literals
 }
 
-const RULES_LISP: LexRules     = { lineComment: ";", blockComment: null, nestedBlock: false, backtickLongString: false };
-const RULES_JANET: LexRules    = { lineComment: "#", blockComment: ["#|", "|#"], nestedBlock: false, backtickLongString: true };
-const RULES_SCHEME: LexRules   = { lineComment: ";", blockComment: ["#|", "|#"], nestedBlock: true, backtickLongString: false };
+const RULES_LISP: LexRules     = { lineComment: ";", blockComment: null, nestedBlock: false, backtickLongString: false, charLiteral: null };
+const RULES_JANET: LexRules    = { lineComment: "#", blockComment: ["#|", "|#"], nestedBlock: false, backtickLongString: true, charLiteral: null };
+const RULES_SCHEME: LexRules   = { lineComment: ";", blockComment: ["#|", "|#"], nestedBlock: true, backtickLongString: false, charLiteral: null };
 
 const BALANCE_RULES: Record<string, LexRules> = {
   ".clj":   RULES_LISP,
@@ -157,12 +148,12 @@ const BALANCE_RULES: Record<string, LexRules> = {
   ".lisp":  RULES_SCHEME,
   ".lsp":   RULES_SCHEME,
   ".cl":    RULES_SCHEME,
-  ".el":    { lineComment: ";", blockComment: null, nestedBlock: false, backtickLongString: false }, // Elisp: ?x char literals
+  ".el":    { lineComment: ";", blockComment: null, nestedBlock: false, backtickLongString: false, charLiteral: "?" },
 };
 
 /** Count delimiters skipping comments, strings, and char literals. */
 function checkDelimiterBalance(path: string, content: string, rules: LexRules): string | null {
-  const b = content; // work with chars for simplicity; source is UTF-8 but all delimiters are ASCII
+  const b = content;
   const n = b.length;
   let i = 0;
   const lineStarts: number[] = [0];
@@ -247,36 +238,50 @@ function checkDelimiterBalance(path: string, content: string, rules: LexRules): 
       continue;
     }
 
-    // Elisp char literal: ?x
-    // Lisp char literal: \x (already handled by the switch default below)
-    // For now, just skip \ and ? followed by any char
+    // Escape: skip \ and the following character
     if (c === "\\" && i + 1 < n) {
       i += 2;
       continue;
     }
 
+    // Char literal (e.g., Elisp: ?x, ?\()
+    if (rules.charLiteral === "?" && c === "?" && i + 1 < n) {
+      if (b[i + 1] === "\\" && i + 2 < n) {
+        i += 3; // skip ?\X
+      } else {
+        i += 2; // skip ?X
+      }
+      continue;
+    }
+
     // Count delimiters
     switch (c) {
-      case "(":
-        stack.push({ ch: "(", line: lineFor(i), col: i - lineStarts[lineFor(i) - 1] + 1 });
+      case "(": {
+        const ln = lineFor(i);
+        stack.push({ ch: "(", line: ln, col: i - lineStarts[ln - 1] + 1 });
         break;
+      }
       case ")": {
         const top = stack.pop();
         if (!top) return `${path}: stray \`)\` at line ${lineFor(i)} — no matching \`(\` before it`;
         break;
       }
-      case "[":
-        stack.push({ ch: "[", line: lineFor(i), col: i - lineStarts[lineFor(i) - 1] + 1 });
+      case "[": {
+        const ln = lineFor(i);
+        stack.push({ ch: "[", line: ln, col: i - lineStarts[ln - 1] + 1 });
         break;
+      }
       case "]": {
         const top = stack.pop();
         if (!top) return `${path}: stray \`]\` at line ${lineFor(i)} — no matching \`[\` before it`;
         if (top.ch !== "[") return `${path}: mismatch at line ${lineFor(i)}: expected \`]\` for \`${top.ch}\` at line ${top.line}`;
         break;
       }
-      case "{":
-        stack.push({ ch: "{", line: lineFor(i), col: i - lineStarts[lineFor(i) - 1] + 1 });
+      case "{": {
+        const ln = lineFor(i);
+        stack.push({ ch: "{", line: ln, col: i - lineStarts[ln - 1] + 1 });
         break;
+      }
       case "}": {
         const top = stack.pop();
         if (!top) return `${path}: stray \`}\` at line ${lineFor(i)} — no matching \`{\` before it`;
