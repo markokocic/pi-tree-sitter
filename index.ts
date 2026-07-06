@@ -13,12 +13,11 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { resolve, dirname } from "node:path";
+import { homedir } from "node:os";
 import { createRequire } from "node:module";
 import { Parser, Language, type Node, type Tree } from "web-tree-sitter";
-
-const require = createRequire(import.meta.url);
 
 // ── Grammar map ──────────────────────────────────────────────────────────
 // Maps file extension → { npm package, wasm filename } for lazy loading.
@@ -54,25 +53,61 @@ const LANGUAGE_MAP: Record<string, GrammarEntry> = {
   ".bash": { pkg: "tree-sitter-bash", wasm: "tree-sitter-bash.wasm" },
 };
 
-// ── Grammar cache ────────────────────────────────────────────────────────
+// ── Grammar cache (hybrid: local → disk cache → CDN) ─────────────────────
 
+const WASM_CDN = "https://cdn.jsdelivr.net/npm";
+const CACHE_DIR = resolve(homedir(), ".cache", "pi-tree-sitter");
+
+const require_ = createRequire(import.meta.url);
 const grammarCache = new Map<string, Language | null>();
 
+/** Resolve a WASM file: local node_modules → disk cache → CDN fetch. */
 async function loadGrammar(entry: GrammarEntry): Promise<Language | null> {
   const key = `${entry.pkg}/${entry.wasm}`;
   const cached = grammarCache.get(key);
   if (cached !== undefined) return cached;
 
+  let wasmBytes: Buffer | Uint8Array | null = null;
+
+  // 1. Local node_modules (zero latency)
   try {
-    const wasmPath = require.resolve(key);
-    const wasmBytes = await readFile(wasmPath);
-    const lang = await Language.load(wasmBytes);
-    grammarCache.set(key, lang);
-    return lang;
+    const wasmPath = require_.resolve(key);
+    wasmBytes = await readFile(wasmPath);
   } catch {
-    grammarCache.set(key, null);
-    return null;
+    // 2. Persistent disk cache (offline reuse)
+    const cachePath = resolve(CACHE_DIR, entry.pkg, entry.wasm);
+    try {
+      wasmBytes = await readFile(cachePath);
+    } catch {
+      // 3. CDN fetch (always works, no npm dependency)
+      try {
+        const url = `${WASM_CDN}/${key}`;
+        const res = await fetch(url);
+        if (res.ok) {
+          wasmBytes = new Uint8Array(await res.arrayBuffer());
+          // Persist to disk cache for next time
+          await mkdir(dirname(cachePath), { recursive: true });
+          await writeFile(cachePath, wasmBytes);
+        }
+      } catch {
+        // All sources exhausted
+      }
+    }
   }
+
+  if (wasmBytes) {
+    try {
+      const lang = await Language.load(wasmBytes);
+      grammarCache.set(key, lang);
+      return lang;
+    } catch {
+      grammarCache.set(key, null);
+      return null;
+    }
+  }
+
+  grammarCache.set(key, null);
+  return null;
 }
 
 // ── Error collection ─────────────────────────────────────────────────────
