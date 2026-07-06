@@ -93,14 +93,16 @@ async function loadGrammar(entry: GrammarEntry): Promise<Language | null> {
       // 3. CDN fetch (always works, no npm dependency)
       try {
         const url = `${WASM_CDN}/${key}`;
+        console.log(`[pi-tree-sitter] downloading ${key} from CDN...`);
         const res = await fetch(url);
-        if (res.ok) {
-          wasmBytes = new Uint8Array(await res.arrayBuffer());
-          // Persist to disk cache for next time
-          await mkdir(dirname(cachePath), { recursive: true });
-          await writeFile(cachePath, wasmBytes);
-        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        wasmBytes = new Uint8Array(await res.arrayBuffer());
+        console.log(`[pi-tree-sitter] ${key} downloaded (${(wasmBytes.length / 1024).toFixed(0)} KB)`);
+        // Persist to disk cache for next time
+        await mkdir(dirname(cachePath), { recursive: true });
+        await writeFile(cachePath, wasmBytes);
       } catch {
+        console.log(`[pi-tree-sitter] failed to download ${key}, skipping validation`);
         // All sources exhausted
       }
     }
@@ -390,10 +392,11 @@ async function validateContent(path: string, content: string): Promise<string | 
       }
       return null;
     }
-    // Grammar package not installed — fall through to balance check
+    // Grammar not available from any source — skip validation
+    return null;
   }
 
-  // Delimiter-balance fallback
+  // Delimiter-balance fallback (only for languages without WASM grammar)
   const rules = ext ? BALANCE_RULES[ext] : undefined;
   if (rules) {
     const err = checkDelimiterBalance(path, content, rules);
