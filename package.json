@@ -1,0 +1,39 @@
+{
+  "name": "pi-tree-sitter",
+  "version": "0.1.0",
+  "description": "Pre-write syntax validation for pi using tree-sitter WASM grammars",
+  "license": "EPL-2.0",
+  "author": "Marko Kocic <marko@euptera.com>",
+  "copyright": "Copyright (c) 2026 Marko Kocic",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "tree-sitter",
+    "syntax",
+    "validation",
+    "linter"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "dependencies": {
+    "web-tree-sitter": "^0.26.10",
+    "tree-sitter-rust": "^0.24.0",
+    "tree-sitter-python": "^0.23.6",
+    "tree-sitter-javascript": "^0.23.1",
+    "tree-sitter-typescript": "^0.23.2",
+    "tree-sitter-go": "^0.23.4",
+    "tree-sitter-java": "^0.23.5",
+    "tree-sitter-ruby": "^0.23.1",
+    "tree-sitter-c": "^0.23.6",
+    "tree-sitter-cpp": "^0.23.4",
+    "tree-sitter-bash": "^0.25.1"
+  }
+}
