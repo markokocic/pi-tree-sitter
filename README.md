@@ -66,7 +66,7 @@ pi -e ./path/to/pi-tree-sitter
 | `.json` | JSON | ✅ |
 | `.kt`, `.kts` | Kotlin | ✅ |
 | `.zig` | Zig | ✅ |
-| `.clj`, `.cljs`, `.cljc`, `.edn`, `.bb` | Clojure | 🔶 (delimiter balance) |
+| `.clj`, `.cljs`, `.cljc`, `.cljd`, `.edn`, `.bb` | Clojure | 🔶 (delimiter balance) |
 | `.fnl` | Fennel | 🔶 (delimiter balance) |
 | `.janet`, `.jdn` | Janet | 🔶 (delimiter balance) |
 | `.scm`, `.ss`, `.rkt` | Scheme | 🔶 (delimiter balance) |
