@@ -12,12 +12,6 @@ Inspired by [dirge](https://github.com/dirge-code/dirge)'s `syntax_validator.rs`
 ## Installation
 
 ```bash
-npm install pi-tree-sitter
-```
-
-Then register with pi:
-
-```bash
 pi install npm:pi-tree-sitter
 ```
 
