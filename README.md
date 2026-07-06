@@ -12,22 +12,36 @@ Inspired by [dirge](https://github.com/dirge-code/dirge)'s `syntax_validator.rs`
 ## Installation
 
 ```bash
-cd ~/src/my/pi/pi-tree-sitter
+npm install pi-tree-sitter
+```
+
+Then register with pi:
+
+```bash
+pi install npm:pi-tree-sitter
+```
+
+### Git version
+
+Install directly from GitHub:
+
+```bash
+pi install git:github.com/markokocic/pi-tree-sitter
+```
+
+Or clone and use locally:
+
+```bash
+git clone https://github.com/markokocic/pi-tree-sitter.git
+cd pi-tree-sitter
 npm install
+pi install .
 ```
 
-Then use with pi:
+Run ad-hoc without installing:
 
 ```bash
-pi -e ~/src/my/pi/pi-tree-sitter
-```
-
-Or install as a package for auto-discovery:
-
-```bash
-pi install ~/src/my/pi/pi-tree-sitter
-# or add to settings.json:
-# "extensions": ["/home/marko/src/my/pi/pi-tree-sitter"]
+pi -e ./path/to/pi-tree-sitter
 ```
 
 ## Supported Languages
@@ -45,6 +59,13 @@ pi install ~/src/my/pi/pi-tree-sitter
 | `.c`, `.h` | C | ✅ |
 | `.cpp`, `.cc`, `.hpp`, `.hh`, `.hxx` | C++ | ✅ |
 | `.sh`, `.bash` | Bash | ✅ |
+| `.css` | CSS | ✅ |
+| `.ex`, `.exs` | Elixir | ✅ |
+| `.hs`, `.lhs` | Haskell | ✅ |
+| `.htm`, `.html` | HTML | ✅ |
+| `.json` | JSON | ✅ |
+| `.kt`, `.kts` | Kotlin | ✅ |
+| `.zig` | Zig | ✅ |
 | `.clj`, `.cljs`, `.cljc`, `.edn`, `.bb` | Clojure | 🔶 (delimiter balance) |
 | `.fnl` | Fennel | 🔶 (delimiter balance) |
 | `.janet`, `.jdn` | Janet | 🔶 (delimiter balance) |
@@ -53,7 +74,11 @@ pi install ~/src/my/pi/pi-tree-sitter
 | `.el` | Emacs Lisp | 🔶 (delimiter balance) |
 
 Languages marked with 🔶 use a comment/string-aware delimiter-balance scanner
-as a fallback (no standalone WASM grammar available for Clojure on npm).
+as a fallback (no standalone WASM grammar available on npm).
+
+WASM grammars are loaded on first use via a hybrid strategy:
+local `node_modules` → disk cache (`~/.cache/pi-tree-sitter/`) → CDN.
+No explicit `npm install` of individual grammar packages is required.
 
 ## How it works
 
