@@ -51,6 +51,17 @@ const LANGUAGE_MAP: Record<string, GrammarEntry> = {
   ".hxx":  { pkg: "tree-sitter-cpp", wasm: "tree-sitter-cpp.wasm" },
   ".sh":   { pkg: "tree-sitter-bash", wasm: "tree-sitter-bash.wasm" },
   ".bash": { pkg: "tree-sitter-bash", wasm: "tree-sitter-bash.wasm" },
+  ".css":  { pkg: "tree-sitter-css", wasm: "tree-sitter-css.wasm" },
+  ".ex":   { pkg: "tree-sitter-elixir", wasm: "tree-sitter-elixir.wasm" },
+  ".exs":  { pkg: "tree-sitter-elixir", wasm: "tree-sitter-elixir.wasm" },
+  ".hs":   { pkg: "tree-sitter-haskell", wasm: "tree-sitter-haskell.wasm" },
+  ".htm":  { pkg: "tree-sitter-html", wasm: "tree-sitter-html.wasm" },
+  ".html": { pkg: "tree-sitter-html", wasm: "tree-sitter-html.wasm" },
+  ".json": { pkg: "tree-sitter-json", wasm: "tree-sitter-json.wasm" },
+  ".kt":   { pkg: "@tree-sitter-grammars/tree-sitter-kotlin", wasm: "tree-sitter-kotlin.wasm" },
+  ".kts":  { pkg: "@tree-sitter-grammars/tree-sitter-kotlin", wasm: "tree-sitter-kotlin.wasm" },
+  ".lhs":  { pkg: "tree-sitter-haskell", wasm: "tree-sitter-haskell.wasm" },
+  ".zig":  { pkg: "@tree-sitter-grammars/tree-sitter-zig", wasm: "tree-sitter-zig.wasm" },
 };
 
 // ── Grammar cache (hybrid: local → disk cache → CDN) ─────────────────────
