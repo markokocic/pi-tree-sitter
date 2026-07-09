@@ -373,6 +373,7 @@ async function validateContent(path: string, content: string): Promise<string | 
 
   const entry = LANGUAGE_MAP[ext];
   if (entry) {
+    await ensureParser();
     const lang = await loadGrammar(entry);
     if (lang) {
       const parser = new Parser();
@@ -400,12 +401,20 @@ async function validateContent(path: string, content: string): Promise<string | 
   return null;
 }
 
+// ── Lazy WASM init ───────────────────────────────────────────────────────
+
+let parserInit: Promise<void> | null = null;
+
+async function ensureParser(): Promise<void> {
+  if (!parserInit) {
+    parserInit = Parser.init();
+  }
+  await parserInit;
+}
+
 // ── Extension entry point ────────────────────────────────────────────────
 
 export default async function (pi: ExtensionAPI) {
-  // Initialize the web-tree-sitter WASM runtime once.
-  await Parser.init();
-
   pi.on("tool_call", async (event, ctx) => {
     // ── write ──────────────────────────────────────────────────────────
     if (event.toolName === "write") {
