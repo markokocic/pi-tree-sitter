@@ -1,372 +1,55 @@
 /**
- * pi-tree-sitter — Pre-write syntax validation for pi
+ * pi-tree-sitter — Pre-write syntax validation + structural code tools for pi
  *
- * Hooks into `write` and `edit` tools. Parses content with tree-sitter WASM
- * grammars and blocks the tool when syntax errors are found. The LLM sees the
- * actionable feedback (line:col, snippet, expected token) in the same turn and
- * self-corrects.
+ * Hooks `write` and `edit` tools to validate syntax (blocks on errors).
+ * Registers semantic tools for AST-level code queries:
+ *   - list_symbols      — symbols in a file or project
+ *   - find_definition   — where a symbol is defined
+ *   - find_callers      — call sites of a function/method
+ *   - get_symbol_body   — full source of a named symbol
  *
- * Languages without a WASM grammar (Clojure, Janet, Fennel, Scheme, Elisp)
- * fall back to a comment/string-aware delimiter-balance scanner.
- *
- * Inspired by dirge's syntax_validator.rs.
+ * Inspired by dirge's syntax_validator.rs and semantic adapters.
  */
-
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { resolve, dirname } from "node:path";
-import { homedir } from "node:os";
-import { Parser, Language, type Node, type Tree } from "web-tree-sitter";
+import { Type } from "typebox";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { Parser, type Tree, type Node as TSNode } from "web-tree-sitter";
 
-// ── Grammar map ──────────────────────────────────────────────────────────
-// Maps file extension → { npm package, wasm filename } for lazy loading.
+import { ensureParser, loadGrammar, LANGUAGE_MAP } from "./src/grammar.js";
+import { BALANCE_RULES, checkDelimiterBalance } from "./src/delimiter.js";
+import type { Symbol as Sym, ExtractedFile, LangConfig } from "./src/languages.js";
+import { configForExt } from "./src/languages.js";
+import { findProjectFiles, readFileSafe } from "./src/files.js";
 
-interface GrammarEntry {
-  pkg: string;
-  wasm: string;
-}
-
-const LANGUAGE_MAP: Record<string, GrammarEntry> = {
-  ".rs":   { pkg: "tree-sitter-rust", wasm: "tree-sitter-rust.wasm" },
-  ".py":   { pkg: "tree-sitter-python", wasm: "tree-sitter-python.wasm" },
-  ".pyi":  { pkg: "tree-sitter-python", wasm: "tree-sitter-python.wasm" },
-  ".ts":   { pkg: "tree-sitter-typescript", wasm: "tree-sitter-typescript.wasm" },
-  ".tsx":  { pkg: "tree-sitter-typescript", wasm: "tree-sitter-tsx.wasm" },
-  ".mts":  { pkg: "tree-sitter-typescript", wasm: "tree-sitter-typescript.wasm" },
-  ".cts":  { pkg: "tree-sitter-typescript", wasm: "tree-sitter-typescript.wasm" },
-  ".js":   { pkg: "tree-sitter-javascript", wasm: "tree-sitter-javascript.wasm" },
-  ".jsx":  { pkg: "tree-sitter-javascript", wasm: "tree-sitter-javascript.wasm" },
-  ".mjs":  { pkg: "tree-sitter-javascript", wasm: "tree-sitter-javascript.wasm" },
-  ".cjs":  { pkg: "tree-sitter-javascript", wasm: "tree-sitter-javascript.wasm" },
-  ".go":   { pkg: "tree-sitter-go", wasm: "tree-sitter-go.wasm" },
-  ".java": { pkg: "tree-sitter-java", wasm: "tree-sitter-java.wasm" },
-  ".rb":   { pkg: "tree-sitter-ruby", wasm: "tree-sitter-ruby.wasm" },
-  ".c":    { pkg: "tree-sitter-c", wasm: "tree-sitter-c.wasm" },
-  ".h":    { pkg: "tree-sitter-c", wasm: "tree-sitter-c.wasm" },
-  ".cpp":  { pkg: "tree-sitter-cpp", wasm: "tree-sitter-cpp.wasm" },
-  ".cc":   { pkg: "tree-sitter-cpp", wasm: "tree-sitter-cpp.wasm" },
-  ".hpp":  { pkg: "tree-sitter-cpp", wasm: "tree-sitter-cpp.wasm" },
-  ".hh":   { pkg: "tree-sitter-cpp", wasm: "tree-sitter-cpp.wasm" },
-  ".hxx":  { pkg: "tree-sitter-cpp", wasm: "tree-sitter-cpp.wasm" },
-  ".sh":   { pkg: "tree-sitter-bash", wasm: "tree-sitter-bash.wasm" },
-  ".bash": { pkg: "tree-sitter-bash", wasm: "tree-sitter-bash.wasm" },
-  ".css":  { pkg: "tree-sitter-css", wasm: "tree-sitter-css.wasm" },
-  ".ex":   { pkg: "tree-sitter-elixir", wasm: "tree-sitter-elixir.wasm" },
-  ".exs":  { pkg: "tree-sitter-elixir", wasm: "tree-sitter-elixir.wasm" },
-  ".hs":   { pkg: "tree-sitter-haskell", wasm: "tree-sitter-haskell.wasm" },
-  ".htm":  { pkg: "tree-sitter-html", wasm: "tree-sitter-html.wasm" },
-  ".html": { pkg: "tree-sitter-html", wasm: "tree-sitter-html.wasm" },
-  ".json": { pkg: "tree-sitter-json", wasm: "tree-sitter-json.wasm" },
-  ".kt":   { pkg: "@tree-sitter-grammars/tree-sitter-kotlin", wasm: "tree-sitter-kotlin.wasm" },
-  ".kts":  { pkg: "@tree-sitter-grammars/tree-sitter-kotlin", wasm: "tree-sitter-kotlin.wasm" },
-  ".lhs":  { pkg: "tree-sitter-haskell", wasm: "tree-sitter-haskell.wasm" },
-  ".zig":  { pkg: "@tree-sitter-grammars/tree-sitter-zig", wasm: "tree-sitter-zig.wasm" },
-};
-
-// ── Grammar cache (CDN → disk cache) ────────────────────────────────────
-// Grammar packages (tree-sitter-*) are not npm dependencies — they bundle
-// native C addons that fail to build on platforms without gyp (Android,
-// etc.). WASM files are fetched from CDN on first use and cached to disk.
-
-const WASM_CDN = "https://cdn.jsdelivr.net/npm";
-const CACHE_DIR = resolve(homedir(), ".cache", "pi-tree-sitter");
-
-const grammarCache = new Map<string, Language | null>();
-
-/** Resolve a WASM file: disk cache → CDN fetch. */
-async function loadGrammar(entry: GrammarEntry): Promise<Language | null> {
-  const key = `${entry.pkg}/${entry.wasm}`;
-  const cached = grammarCache.get(key);
-  if (cached !== undefined) return cached;
-
-  let wasmBytes: Uint8Array | null = null;
-
-  // 1. Persistent disk cache (offline reuse, zero latency)
-  const cachePath = resolve(CACHE_DIR, entry.pkg, entry.wasm);
-  try {
-    wasmBytes = new Uint8Array(await readFile(cachePath));
-  } catch {
-    // 2. CDN fetch (always works, no npm dependency)
-    try {
-      const url = `${WASM_CDN}/${key}`;
-      console.log(`[pi-tree-sitter] downloading ${key} from CDN...`);
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      wasmBytes = new Uint8Array(await res.arrayBuffer());
-      console.log(`[pi-tree-sitter] ${key} downloaded (${(wasmBytes.length / 1024).toFixed(0)} KB)`);
-      // Persist to disk cache for next time
-      await mkdir(dirname(cachePath), { recursive: true });
-      await writeFile(cachePath, Buffer.from(wasmBytes));
-    } catch {
-      console.log(`[pi-tree-sitter] failed to download ${key}, skipping validation`);
-    }
-  }
-
-  if (wasmBytes) {
-    try {
-      const lang = await Language.load(wasmBytes);
-      grammarCache.set(key, lang);
-      return lang;
-    } catch {
-      grammarCache.set(key, null);
-      return null;
-    }
-  }
-
-  grammarCache.set(key, null);
-  return null;
-}
-
-// ── Error collection ─────────────────────────────────────────────────────
+// ── Error collection (write-time validation) ─────────────────────────────
 
 const MAX_ERRORS = 10;
 
-/** Collect ERROR/MISSING nodes from a syntax tree, capped at MAX_ERRORS. */
 function collectErrors(tree: Tree, source: string): string[] {
   const errors: string[] = [];
-  const stack: Node[] = [tree.rootNode];
+  const stack: TSNode[] = [tree.rootNode];
 
   while (stack.length > 0 && errors.length < MAX_ERRORS) {
     const node = stack.pop()!;
-
     if (node.isError || node.isMissing) {
       const pos = node.startPosition;
       const raw = source.slice(node.startIndex, Math.min(node.endIndex, source.length));
       const snippet = raw.split("\n")[0].slice(0, 80).trimEnd();
-
       if (node.isMissing) {
-        // For MISSING nodes, `.type` is the grammar-level expected token
-        // (e.g. "}", ")", ";"). This is the most actionable detail.
-        errors.push(`  missing \`${node.type}\` at ${pos.row + 1}:${pos.column + 1}: ${snippet}`);
+        errors.push("  missing `" + node.type + "` at " + (pos.row + 1) + ":" + (pos.column + 1) + ": " + snippet);
       } else {
-        errors.push(`  syntax error at ${pos.row + 1}:${pos.column + 1}: ${snippet}`);
+        errors.push("  syntax error at " + (pos.row + 1) + ":" + (pos.column + 1) + ": " + snippet);
       }
-      // Don't descend into error nodes — their children are noise.
       continue;
     }
-
-    // Push children in reverse order so the walk is left-to-right.
     const children = node.children;
-    for (let i = children.length - 1; i >= 0; i--) {
-      stack.push(children[i]);
-    }
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
   }
-
   return errors;
 }
 
-// ── Delimiter-balance scanner (fallback for Lisp-like languages) ─────────
-
-/**
- * Simple line/column counter for the balance scanner.
- * Tracks absolute position for error reporting but is simple enough that
- * we compute line numbers inline for human-readable messages.
- */
-interface LexRules {
-  lineComment: string | null;              // e.g. ";"
-  blockComment: [string, string] | null;   // e.g. ["#|", "|#"]
-  nestedBlock: boolean;
-  backtickLongString: boolean;
-  charLiteral: "?" | null;                 // e.g. Elisp uses ?x for char literals
-}
-
-const RULES_LISP: LexRules     = { lineComment: ";", blockComment: null, nestedBlock: false, backtickLongString: false, charLiteral: null };
-const RULES_JANET: LexRules    = { lineComment: "#", blockComment: ["#|", "|#"], nestedBlock: false, backtickLongString: true, charLiteral: null };
-const RULES_SCHEME: LexRules   = { lineComment: ";", blockComment: ["#|", "|#"], nestedBlock: true, backtickLongString: false, charLiteral: null };
-
-const BALANCE_RULES: Record<string, LexRules> = {
-  ".clj":   RULES_LISP,
-  ".cljs":  RULES_LISP,
-  ".cljc":  RULES_LISP,
-  ".cljd":  RULES_LISP,
-  ".edn":   RULES_LISP,
-  ".bb":    RULES_LISP,
-  ".fnl":   RULES_LISP,
-  ".janet": RULES_JANET,
-  ".jdn":   RULES_JANET,
-  ".scm":   RULES_SCHEME,
-  ".ss":    RULES_SCHEME,
-  ".rkt":   RULES_SCHEME,
-  ".lisp":  RULES_SCHEME,
-  ".lsp":   RULES_SCHEME,
-  ".cl":    RULES_SCHEME,
-  ".el":    { lineComment: ";", blockComment: null, nestedBlock: false, backtickLongString: false, charLiteral: "?" },
-};
-
-/** Count delimiters skipping comments, strings, and char literals. */
-function checkDelimiterBalance(path: string, content: string, rules: LexRules): string | null {
-  const b = content;
-  const n = b.length;
-  let i = 0;
-  const lineStarts: number[] = [0];
-  for (let j = 0; j < n; j++) {
-    if (b[j] === "\n") lineStarts.push(j + 1);
-  }
-
-  function lineFor(pos: number): number {
-    // Binary search for the nearest line start ≤ pos
-    let lo = 0, hi = lineStarts.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
-      if (lineStarts[mid] <= pos) lo = mid;
-      else hi = mid - 1;
-    }
-    return lo + 1; // 1-based
-  }
-
-  const stack: Array<{ ch: string; line: number; col: number }> = [];
-
-  while (i < n) {
-    const c = b[i];
-    const next = i + 1 < n ? b[i + 1] : null;
-
-    // Line comment
-    if (rules.lineComment && c === rules.lineComment[0]) {
-      const eol = b.indexOf("\n", i);
-      i = eol === -1 ? n : eol + 1;
-      continue;
-    }
-
-    // Block comment
-    if (rules.blockComment) {
-      const [open, close] = rules.blockComment;
-      if (c === open[0] && next === open[1]) {
-        i += 2;
-        let depth = 1;
-        while (i < n && depth > 0) {
-          const cc = b[i];
-          const nn = i + 1 < n ? b[i + 1] : null;
-          if (rules.nestedBlock && cc === open[0] && nn === open[1]) {
-            depth++;
-            i += 2;
-          } else if (cc === close[0] && nn === close[1]) {
-            depth--;
-            i += 2;
-          } else {
-            i++;
-          }
-        }
-        continue;
-      }
-    }
-
-    // String
-    if (c === '"') {
-      i++;
-      while (i < n) {
-        if (b[i] === "\\") { i += 2; continue; }
-        if (b[i] === '"') { i++; break; }
-        i++;
-      }
-      continue;
-    }
-
-    // Backtick long-string (Janet)
-    if (rules.backtickLongString && c === "`") {
-      // Count opening backticks
-      let k = 0;
-      while (i + k < n && b[i + k] === "`") k++;
-      i += k;
-      while (i < n) {
-        if (b[i] === "`") {
-          let j = 0;
-          while (i + j < n && b[i + j] === "`") j++;
-          if (j >= k) { i += k; break; }
-          i += j;
-        } else {
-          i++;
-        }
-      }
-      continue;
-    }
-
-    // Escape: skip \ and the following character
-    if (c === "\\" && i + 1 < n) {
-      i += 2;
-      continue;
-    }
-
-    // Char literal (e.g., Elisp: ?x, ?\()
-    if (rules.charLiteral === "?" && c === "?" && i + 1 < n) {
-      if (b[i + 1] === "\\" && i + 2 < n) {
-        i += 3; // skip ?\X
-      } else {
-        i += 2; // skip ?X
-      }
-      continue;
-    }
-
-    // Count delimiters
-    switch (c) {
-      case "(": {
-        const ln = lineFor(i);
-        stack.push({ ch: "(", line: ln, col: i - lineStarts[ln - 1] + 1 });
-        break;
-      }
-      case ")": {
-        const top = stack.pop();
-        if (!top) return `${path}: stray \`)\` at line ${lineFor(i)} — no matching \`(\` before it`;
-        break;
-      }
-      case "[": {
-        const ln = lineFor(i);
-        stack.push({ ch: "[", line: ln, col: i - lineStarts[ln - 1] + 1 });
-        break;
-      }
-      case "]": {
-        const top = stack.pop();
-        if (!top) return `${path}: stray \`]\` at line ${lineFor(i)} — no matching \`[\` before it`;
-        if (top.ch !== "[") return `${path}: mismatch at line ${lineFor(i)}: expected \`]\` for \`${top.ch}\` at line ${top.line}`;
-        break;
-      }
-      case "{": {
-        const ln = lineFor(i);
-        stack.push({ ch: "{", line: ln, col: i - lineStarts[ln - 1] + 1 });
-        break;
-      }
-      case "}": {
-        const top = stack.pop();
-        if (!top) return `${path}: stray \`}\` at line ${lineFor(i)} — no matching \`{\` before it`;
-        if (top.ch !== "{") return `${path}: mismatch at line ${lineFor(i)}: expected \`}\` for \`${top.ch}\` at line ${top.line}`;
-        break;
-      }
-    }
-
-    i++;
-  }
-
-  if (stack.length > 0) {
-    const top = stack[0];
-    const opener = top.ch;
-    return `${path}: ${stack.length} unclosed \`${opener}\` — the one at line ${top.line} is never closed; add ${stack.length} matching \`${{ "(": ")", "[": "]", "{": "}" }[opener]}\``;
-  }
-
-  return null;
-}
-
-// ── Validation helpers ──────────────────────────────────────────────────
-
-function formatError(path: string, errors: string[]): string {
-  let msg = `Syntax check failed for ${path}: ${errors.length} error(s) detected by tree-sitter.
-Fix and re-submit. (This is a pre-write guard — the file was NOT modified.)
-`;
-  msg += errors.join("\n");
-  if (errors.length >= MAX_ERRORS) {
-    msg += `\n  …(truncated at ${MAX_ERRORS} errors; fix the listed issues and re-check)`;
-  }
-  return msg;
-}
-
-function formatBalanceError(path: string, detail: string): string {
-  return `Syntax check failed for ${path}: delimiters are unbalanced.
-Fix and re-submit. (This is a pre-write guard — the file was NOT modified.)
-  ${detail}`;
-}
-
-/**
- * Validate content for a given file path. Returns null (clean), or a
- * formatted error message to surface as the block reason.
- */
+/** Validate content for write/edit blocking. Returns null = clean. */
 async function validateContent(path: string, content: string): Promise<string | null> {
   const ext = path.match(/\.[^.]+$/)?.[0]?.toLowerCase();
   if (!ext) return null;
@@ -382,41 +65,85 @@ async function validateContent(path: string, content: string): Promise<string | 
       if (tree && tree.rootNode.hasError) {
         const errors = collectErrors(tree, content);
         if (errors.length > 0) {
-          return formatError(path, errors);
+          let msg = "Syntax check failed for " + path + ": " + errors.length + " error(s) detected by tree-sitter.\n";
+          msg += "Fix and re-submit. (This is a pre-write guard \u2014 the file was NOT modified.)\n";
+          msg += errors.join("\n");
+          if (errors.length >= MAX_ERRORS) {
+            msg += "\n  \u2026(truncated at " + MAX_ERRORS + " errors; fix the listed issues and re-check)";
+          }
+          return msg;
         }
       }
+      // Grammar loaded but file has no errors — clean
       return null;
     }
-    // Grammar not available from any source — skip validation
-    return null;
+    // Grammar not available — fall through to delimiter balance if rules exist
   }
 
-  // Delimiter-balance scanner (only for Lisp-like languages without WASM grammars)
   const rules = ext ? BALANCE_RULES[ext] : undefined;
   if (rules) {
     const err = checkDelimiterBalance(path, content, rules);
-    if (err) return formatBalanceError(path, err);
+    if (err) {
+      return "Syntax check failed for " + path + ": delimiters are unbalanced.\nFix and re-submit. (This is a pre-write guard \u2014 the file was NOT modified.)\n  " + err;
+    }
   }
-
   return null;
 }
 
-// ── Lazy WASM init ───────────────────────────────────────────────────────
+// ── Semantic tool helpers ────────────────────────────────────────────────
 
-let parserInit: Promise<void> | null = null;
-
-async function ensureParser(): Promise<void> {
-  if (!parserInit) {
-    parserInit = Parser.init();
-  }
-  await parserInit;
+function formatSymbol(sym: Sym): string {
+  const classHint = sym.parentClass ? " [class: " + sym.parentClass + "]" : "";
+  const exportMark = sym.isExported ? " (exported)" : "";
+  return "  " + sym.range.startLine + "-" + sym.range.endLine + " [" + sym.kind + "] " + sym.name + classHint + exportMark;
 }
 
-// ── Extension entry point ────────────────────────────────────────────────
+function formatResults(results: Map<string, Sym[]>): string {
+  let total = 0;
+  const parts: string[] = [];
+  for (const [path, syms] of results) {
+    parts.push("## " + path);
+    for (const sym of syms) {
+      parts.push(formatSymbol(sym));
+    }
+    total += syms.length;
+  }
+  parts.push("\n" + total + " symbols across " + results.size + " files");
+  return parts.join("\n");
+}
+
+async function extractFile(filePath: string): Promise<ExtractedFile | null> {
+  const ext = filePath.match(/\.[^.]+$/)?.[0]?.toLowerCase();
+  if (!ext) return null;
+  const config = configForExt(ext);
+  if (!config) return null;
+  const entry = LANGUAGE_MAP[ext];
+  if (!entry) return null;
+  const source = await readFileSafe(filePath);
+  if (source === null) return null;
+  await ensureParser();
+  const lang = await loadGrammar(entry);
+  if (!lang) return null;
+  return config.extract(source, lang);
+}
+
+async function extractAllFiles(dir: string): Promise<Map<string, Sym[]>> {
+  const results = new Map<string, Sym[]>();
+  const files = await findProjectFiles(dir);
+  for (const file of files) {
+    const extracted = await extractFile(file);
+    if (extracted && extracted.symbols.length > 0) {
+      results.set(file, extracted.symbols);
+    }
+  }
+  return results;
+}
+
+// ── Entry point ──────────────────────────────────────────────────────────
 
 export default async function (pi: ExtensionAPI) {
+  // ── Write/Edit validation (existing behavior) ────────────────────────
   pi.on("tool_call", async (event, ctx) => {
-    // ── write ──────────────────────────────────────────────────────────
     if (event.toolName === "write") {
       const input = event.input as { path: string; content: string };
       const err = await validateContent(input.path, input.content);
@@ -424,35 +151,205 @@ export default async function (pi: ExtensionAPI) {
       return;
     }
 
-    // ── edit ───────────────────────────────────────────────────────────
     if (event.toolName === "edit") {
       const input = event.input as {
         path: string;
         edits: Array<{ oldText: string; newText: string }>;
       };
       if (!input.edits || input.edits.length === 0) return;
-
       const absolutePath = resolve(ctx.cwd, input.path);
-
       try {
         const rawContent = await readFile(absolutePath, "utf-8");
-
-        // Apply edits sequentially (best-effort approximation of the final
-        // content for validation). If an edit's oldText is not found, skip
-        // it — the edit tool itself will report that error.
         let result = rawContent;
         for (const edit of input.edits) {
           const idx = result.indexOf(edit.oldText);
           if (idx === -1) continue;
           result = result.slice(0, idx) + edit.newText + result.slice(idx + edit.oldText.length);
         }
-
         const err = await validateContent(input.path, result);
         if (err) return { block: true, reason: err };
       } catch {
-        // File doesn't exist or can't be read as UTF-8 — let the edit tool
-        // handle the error itself.
+        // File doesn't exist — let edit tool handle the error
       }
     }
+  });
+
+  // ── list_symbols ─────────────────────────────────────────────────────
+  pi.registerTool({
+    name: "list_symbols",
+    label: "List Symbols",
+    description: "List symbols (functions, classes, methods, etc.) in a file or across the project. Parses code with tree-sitter for accurate results. Use this instead of grep when looking for code structure.",
+    parameters: Type.Object({
+      path: Type.Optional(Type.String({ description: "File path to list symbols from. Omit to list across all project files." })),
+      kind: Type.Optional(Type.String({ description: "Filter by symbol kind: function, class, method, interface, type, variable" })),
+    }),
+    async execute(_toolCallId, params) {
+      const filterKind = params.kind?.toLowerCase();
+      let results: Map<string, Sym[]>;
+      if (params.path) {
+        const filePath = resolve(params.path);
+        const extracted = await extractFile(filePath);
+        results = new Map();
+        if (extracted) results.set(filePath, extracted.symbols);
+      } else {
+        results = await extractAllFiles(process.cwd());
+      }
+      if (results.size === 0) {
+        return { content: [{ type: "text", text: "No symbols found." }], details: {} };
+      }
+      if (filterKind) {
+        for (const [path, syms] of results) {
+          const filtered = syms.filter(s => s.kind === filterKind);
+          if (filtered.length > 0) results.set(path, filtered);
+          else results.delete(path);
+        }
+      }
+      return { content: [{ type: "text", text: formatResults(results) }], details: {} };
+    },
+  });
+
+  // ── find_definition ──────────────────────────────────────────────────
+  pi.registerTool({
+    name: "find_definition",
+    label: "Find Definition",
+    description: "Find where a SYMBOL (function, class, type, etc.) is DEFINED across the project. Uses tree-sitter for precise structural matching. NOT for finding files by name \u2014 use `find_files` for that. NOT for content search \u2014 use `grep`.",
+    parameters: Type.Object({
+      name: Type.String({ description: "Name of the symbol to find" }),
+    }),
+    async execute(_toolCallId, params) {
+      const allResults = await extractAllFiles(process.cwd());
+      interface Hit { path: string; sym: Sym }
+      const hits: Hit[] = [];
+      for (const [path, syms] of allResults) {
+        for (const sym of syms) {
+          if (sym.name === params.name) hits.push({ path, sym });
+        }
+      }
+      if (hits.length === 0) {
+        return { content: [{ type: "text", text: "No definition found for '" + params.name + "'" }], details: {} };
+      }
+      const lines: string[] = ["Found " + hits.length + " definition(s) for '" + params.name + "':"];
+      for (const { path, sym } of hits) {
+        lines.push("  " + path + ":" + sym.range.startLine + " [" + sym.kind + "] " + sym.signature);
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }], details: {} };
+    },
+  });
+
+  // ── find_callers ─────────────────────────────────────────────────────
+  pi.registerTool({
+    name: "find_callers",
+    label: "Find Callers",
+    description: "Find all call sites of a function or method across the project. Searches source files for references, excluding the definition site. Supports all tree-sitter supported languages.",
+    parameters: Type.Object({
+      name: Type.String({ description: "Name of the function/method to find callers of" }),
+      path: Type.Optional(Type.String({ description: "Directory to search in (defaults to current working directory)" })),
+    }),
+    async execute(_toolCallId, params) {
+      const searchPath = params.path ? resolve(params.path) : process.cwd();
+      const callers: string[] = [];
+
+      const files = await findProjectFiles(searchPath);
+      for (const file of files) {
+        const ext = file.match(/\.[^.]+$/)?.[0]?.toLowerCase();
+        if (!ext) continue;
+        const config = configForExt(ext);
+        if (!config) continue;
+        const entry = LANGUAGE_MAP[ext];
+        if (!entry) continue;
+        await ensureParser();
+        const lang = await loadGrammar(entry);
+        if (!lang) continue;
+        const source = await readFileSafe(file);
+        if (source === null) continue;
+
+        const extracted = config.extract(source, lang);
+        for (const sym of extracted.symbols) {
+          if (sym.name === params.name) continue;
+          const bodySource = source.slice(sym.range.startByte, sym.range.endByte);
+          if (bodySource.indexOf(params.name) !== -1) {
+            const callees = config.findCallees(source, lang, sym.range);
+            if (callees.indexOf(params.name) !== -1) {
+              callers.push("  " + file + ":" + sym.range.startLine + " [" + sym.kind + "] " + sym.name);
+            }
+          }
+        }
+      }
+
+      if (callers.length === 0) {
+        return { content: [{ type: "text", text: "No callers found for '" + params.name + "'" }], details: {} };
+      }
+      return { content: [{ type: "text", text: callers.length + " caller(s) for '" + params.name + "':\n" + callers.join("\n") }], details: {} };
+    },
+  });
+
+  // ── get_symbol_body ──────────────────────────────────────────────────
+  pi.registerTool({
+    name: "get_symbol_body",
+    label: "Get Symbol Body",
+    description: "Get the full source code of a named symbol (function, class, method, etc.) from a file. Uses tree-sitter to precisely extract by byte range.",
+    parameters: Type.Object({
+      path: Type.String({ description: "Path to the file containing the symbol" }),
+      name: Type.String({ description: "Name of the symbol to retrieve" }),
+    }),
+    async execute(_toolCallId, params) {
+      const filePath = resolve(params.path);
+      const extracted = await extractFile(filePath);
+      if (!extracted) {
+        return { content: [{ type: "text", text: "Could not parse " + filePath }], details: {} };
+      }
+      for (const sym of extracted.symbols) {
+        if (sym.name === params.name) {
+          const source = await readFileSafe(filePath);
+          if (source === null) {
+            return { content: [{ type: "text", text: "Could not read " + filePath }], details: {} };
+          }
+          const body = source.slice(sym.range.startByte, sym.range.endByte);
+          return {
+            content: [{ type: "text", text: "Symbol: " + params.name + " in " + filePath + "\n\n" + body }],
+            details: {},
+          };
+        }
+      }
+      return { content: [{ type: "text", text: "Symbol '" + params.name + "' not found in " + filePath }], details: {} };
+    },
+  });
+
+  // ── find_callees ─────────────────────────────────────────────────────
+  pi.registerTool({
+    name: "find_callees",
+    label: "Find Callees",
+    description: "Find all functions/methods called by a given symbol (its callees). Uses tree-sitter to extract call expressions from the symbol body. Supports all tree-sitter supported languages.",
+    parameters: Type.Object({
+      path: Type.String({ description: "Path to the file containing the symbol" }),
+      name: Type.String({ description: "Name of the function/method to analyze" }),
+    }),
+    async execute(_toolCallId, params) {
+      const filePath = resolve(params.path);
+      const ext = filePath.match(/\.[^.]+$/)?.[0]?.toLowerCase();
+      if (!ext) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: {} };
+      const config = configForExt(ext);
+      if (!config) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: {} };
+      const entry = LANGUAGE_MAP[ext];
+      if (!entry) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: {} };
+      await ensureParser();
+      const lang = await loadGrammar(entry);
+      if (!lang) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: {} };
+      const source = await readFileSafe(filePath);
+      if (source === null) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: {} };
+
+      const extracted = config.extract(source, lang);
+      for (const sym of extracted.symbols) {
+        if (sym.name === params.name) {
+          const callees = config.findCallees(source, lang, sym.range);
+          if (callees.length === 0) {
+            return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: {} };
+          }
+          const lines = callees.map(c => "  " + c);
+          return { content: [{ type: "text", text: "Callees of " + params.name + " in " + filePath + ":\n" + lines.join("\n") }], details: {} };
+        }
+      }
+      return { content: [{ type: "text", text: "Symbol '" + params.name + "' not found in " + filePath }], details: {} };
+    },
   });
 }
