@@ -179,6 +179,7 @@ export default async function (pi: ExtensionAPI) {
     name: "list_symbols",
     label: "List Symbols",
     description: "List symbols (functions, classes, methods, etc.) in a file or across the project. Parses code with tree-sitter for accurate results. Use this instead of grep when looking for code structure.",
+    promptSnippet: "List symbols (functions, classes, methods, etc.) in files",
     parameters: Type.Object({
       path: Type.Optional(Type.String({ description: "File path to list symbols from. Omit to list across all project files." })),
       kind: Type.Optional(Type.String({ description: "Filter by symbol kind: function, class, method, interface, type, variable" })),
@@ -213,6 +214,7 @@ export default async function (pi: ExtensionAPI) {
     name: "find_definition",
     label: "Find Definition",
     description: "Find where a SYMBOL (function, class, type, etc.) is DEFINED across the project. Uses tree-sitter for precise structural matching. NOT for finding files by name \u2014 use `find_files` for that. NOT for content search \u2014 use `grep`.",
+    promptSnippet: "Find where a symbol is defined across the project",
     parameters: Type.Object({
       name: Type.String({ description: "Name of the symbol to find" }),
     }),
@@ -241,6 +243,7 @@ export default async function (pi: ExtensionAPI) {
     name: "find_callers",
     label: "Find Callers",
     description: "Find all call sites of a function or method across the project. Searches source files for references, excluding the definition site. Supports all tree-sitter supported languages.",
+    promptSnippet: "Find all call sites of a function or method across the project",
     parameters: Type.Object({
       name: Type.String({ description: "Name of the function/method to find callers of" }),
       path: Type.Optional(Type.String({ description: "Directory to search in (defaults to current working directory)" })),
@@ -288,6 +291,7 @@ export default async function (pi: ExtensionAPI) {
     name: "get_symbol_body",
     label: "Get Symbol Body",
     description: "Get the full source code of a named symbol (function, class, method, etc.) from a file. Uses tree-sitter to precisely extract by byte range.",
+    promptSnippet: "Get the full source code of a named symbol from a file",
     parameters: Type.Object({
       path: Type.String({ description: "Path to the file containing the symbol" }),
       name: Type.String({ description: "Name of the symbol to retrieve" }),
@@ -320,6 +324,7 @@ export default async function (pi: ExtensionAPI) {
     name: "find_callees",
     label: "Find Callees",
     description: "Find all functions/methods called by a given symbol (its callees). Uses tree-sitter to extract call expressions from the symbol body. Supports all tree-sitter supported languages.",
+    promptSnippet: "Find all functions or methods called by a given symbol",
     parameters: Type.Object({
       path: Type.String({ description: "Path to the file containing the symbol" }),
       name: Type.String({ description: "Name of the function/method to analyze" }),
