@@ -106,14 +106,35 @@ export async function ensureParser(): Promise<void> {
   await parserInit;
 }
 
-/** Resolve a WASM file: disk cache → CDN fetch → return Language or null.
- *
- * Caches WASM files to disk with the server's ETag. On subsequent requests
- * sends `If-None-Match` — if the server returns 304, keeps the cached copy;
- * if 200, downloads the updated grammar.
- */
 /** How often to revalidate cached grammars against the CDN (30 days in ms). */
 const REVALIDATE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Max retries for CDN fetches. */
+const MAX_FETCH_RETRIES = 3;
+
+/** Fetch timeout in ms. */
+const FETCH_TIMEOUT_MS = 30_000;
+
+/** Fetch with retries, exponential backoff, and timeout. */
+async function fetchWithRetry(url: string, options: RequestInit = {}): Promise<Response> {
+  let lastErr: Error | undefined;
+  for (let attempt = 1; attempt <= MAX_FETCH_RETRIES; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timeoutId);
+      return res;
+    } catch (err) {
+      lastErr = err instanceof Error ? err : new Error(String(err));
+      if (attempt < MAX_FETCH_RETRIES) {
+        const delay = 1000 * Math.pow(2, attempt - 1);  // 1s, 2s, 4s
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+  throw lastErr ?? new Error("fetch failed");
+}
 
 /** Resolve a WASM file: disk cache → conditional CDN fetch → return Language or null.
  *
@@ -123,6 +144,7 @@ const REVALIDATE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
  *   304 → touch date file (reset the 30-day timer)
  *   200 → download new version, update cache + etag + date
  * - On network error during revalidation → keep cache, touch date (retry in 30 days).
+ * - Fresh downloads retry up to MAX_FETCH_RETRIES times with exponential backoff.
  */
 export async function loadGrammar(entry: GrammarEntry): Promise<Language | null> {
   const key = `${entry.pkg}/${entry.wasm}`;
@@ -158,7 +180,6 @@ export async function loadGrammar(entry: GrammarEntry): Promise<Language | null>
   async function tryLoad(bytes: Uint8Array): Promise<Language | null> {
     const lang = await Language.load(bytes).catch(() => null);
     if (lang) { grammarCache.set(key, lang); return lang; }
-    // Corrupted bytes — clear cache so next call re-downloads instead of failing forever
     grammarCache.set(key, null);
     await clearCache();
     return null;
@@ -172,65 +193,65 @@ export async function loadGrammar(entry: GrammarEntry): Promise<Language | null>
   if (wasmBytes && cachedEtag && cachedDate) {
     const age = Date.now() - parseInt(cachedDate, 10);
     if (age < REVALIDATE_AFTER_MS) {
-      // Cache is fresh enough — use it
       const lang = await tryLoad(wasmBytes);
       if (lang) return lang;
-      return null;
-    }
-
-    // 2. Cache is stale — revalidate with conditional GET
-    try {
-      const url = `${WASM_CDN}/${key}`;
-      const res = await fetch(url, { headers: { "If-None-Match": cachedEtag } });
-      if (res.status === 304) {
-        // Unchanged — reset timer and use cache
+      // Cached bytes are corrupted — fall through to re-download
+    } else {
+      // 2. Cache is stale — revalidate with conditional GET
+      try {
+        const url = `${WASM_CDN}/${key}`;
+        const res = await fetchWithRetry(url, { headers: { "If-None-Match": cachedEtag } });
+        if (res.status === 304) {
+          await touchDate();
+          const lang = await tryLoad(wasmBytes!);
+          if (lang) return lang;
+        } else if (res.ok) {
+          wasmBytes = new Uint8Array(await res.arrayBuffer());
+          const newEtag = res.headers.get("etag") || "";
+          console.log(`[pi-tree-sitter] updated ${key} (${(wasmBytes.length / 1024).toFixed(0)} KB)`);
+          await saveCache(wasmBytes, newEtag);
+          const lang = await tryLoad(wasmBytes);
+          if (lang) return lang;
+        } else {
+          // Unexpected status (429, 500, etc.) — keep cache, retry in 30 days
+          await touchDate();
+          const lang = await tryLoad(wasmBytes);
+          if (lang) return lang;
+        }
+      } catch {
+        // Network error — keep cached copy, reset timer (retry in 30 days)
         await touchDate();
         const lang = await tryLoad(wasmBytes);
         if (lang) return lang;
-        return null;
       }
-      if (res.ok) {
-        // New version available
-        wasmBytes = new Uint8Array(await res.arrayBuffer());
-        const newEtag = res.headers.get("etag") || "";
-        console.log(`[pi-tree-sitter] updated ${key} (${(wasmBytes.length / 1024).toFixed(0)} KB)`);
-        await saveCache(wasmBytes, newEtag);
-        const lang = await tryLoad(wasmBytes);
-        if (lang) return lang;
-        return null;
-      }
-      // Unexpected status (429, 500, etc.) — keep cache, retry in 30 days
-      await touchDate();
-      const lang = await tryLoad(wasmBytes);
-      if (lang) return lang;
-      return null;
-    } catch {
-      // Network error — keep cached copy, reset timer (retry in 30 days)
-      await touchDate();
-      const lang = await tryLoad(wasmBytes);
-      if (lang) return lang;
-      return null;
     }
   }
 
-  // 3. No cache at all — fresh download
-  try {
-    const url = `${WASM_CDN}/${key}`;
-    console.log(`[pi-tree-sitter] downloading ${key} from CDN...`);
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    wasmBytes = new Uint8Array(await res.arrayBuffer());
-    const etag = res.headers.get("etag") || "";
-    console.log(`[pi-tree-sitter] ${key} downloaded (${(wasmBytes.length / 1024).toFixed(0)} KB)`);
-    // Verify bytes before saving to disk
-    const lang = await Language.load(wasmBytes).catch(() => null);
-    if (lang) {
-      await saveCache(wasmBytes, etag);
-      grammarCache.set(key, lang);
-      return lang;
+  // 3. No cache (or cache corrupted) — fresh download with retry
+  for (let attempt = 1; attempt <= MAX_FETCH_RETRIES; attempt++) {
+    try {
+      const url = `${WASM_CDN}/${key}`;
+      console.log(`[pi-tree-sitter] downloading ${key} from CDN...`);
+      const res = await fetchWithRetry(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      wasmBytes = new Uint8Array(await res.arrayBuffer());
+      const etag = res.headers.get("etag") || "";
+      console.log(`[pi-tree-sitter] ${key} downloaded (${(wasmBytes.length / 1024).toFixed(0)} KB)`);
+      const lang = await Language.load(wasmBytes).catch(() => null);
+      if (lang) {
+        await saveCache(wasmBytes, etag);
+        grammarCache.set(key, lang);
+        return lang;
+      }
+      // Downloaded bytes are invalid — try again
+      console.log(`[pi-tree-sitter] ${key} downloaded but invalid, retrying (${attempt}/${MAX_FETCH_RETRIES})`);
+    } catch (err) {
+      console.log(`[pi-tree-sitter] failed to download ${key} (attempt ${attempt}/${MAX_FETCH_RETRIES}): ${err instanceof Error ? err.message : String(err)}`);
+      if (attempt < MAX_FETCH_RETRIES) {
+        const delay = 1000 * Math.pow(2, attempt - 1);
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
-  } catch {
-    console.log(`[pi-tree-sitter] failed to download ${key}`);
   }
 
   grammarCache.set(key, null);
