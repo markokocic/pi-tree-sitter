@@ -65,23 +65,23 @@ function parseSource(source: string, lang: Language): Parser {
 function queryCaptures(
   source: string, lang: Language, querySource: string,
   captureName: string, range?: ByteRange,
-): string[] {
+): Array<{ name: string; line: number }> {
   try {
     const q = new Query(lang, querySource);
     const p = parseSource(source, lang);
     const root = p.parse(source)!.rootNode;
     const matches = q.matches(root, {});
-    const names: string[] = [];
+    const result: Array<{ name: string; line: number }> = [];
     for (const m of matches) {
       for (const c of m.captures) {
         if (c.name === captureName) {
           if (!range || (c.node.startIndex >= range.startByte && c.node.startIndex <= range.endByte)) {
-            names.push(nodeText(c.node, source));
+            result.push({ name: nodeText(c.node, source), line: c.node.startPosition.row + 1 });
           }
         }
       }
     }
-    return names;
+    return result;
   } catch {
     return [];
   }
@@ -94,7 +94,7 @@ export interface LangConfig {
   /** Extract symbols from source. */
   extract: (source: string, lang: Language) => ExtractedFile;
   /** Find callee names within a byte range. */
-  findCallees: (source: string, lang: Language, range: ByteRange) => string[];
+  findCallees: (source: string, lang: Language, range: ByteRange) => Array<{ name: string; line: number }>;
 }
 
 // ── TypeScript / JavaScript ──────────────────────────────────────────────

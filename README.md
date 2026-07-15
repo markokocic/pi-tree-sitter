@@ -41,11 +41,24 @@ pi -e ./path/to/pi-tree-sitter
 |------|-----------|-------------|
 | `list_symbols` | `path?`, `kind?` | List symbols (functions, classes, methods, etc.) in a file or across the project. Parses code with tree-sitter for accurate results. Use this instead of grep when looking for code structure. |
 | `find_definition` | `name` | Find where a SYMBOL (function, class, type, etc.) is DEFINED across the project. Uses tree-sitter for precise structural matching. NOT for finding files by name — use `find_files` for that. NOT for content search — use `grep`. |
-| `find_callers` | `name`, `path?` | Find all call sites of a function or method across the project. Searches source files for references, excluding the definition site. Supports all tree-sitter supported languages. |
-| `find_callees` | `path`, `name` | Find all functions/methods called by a given symbol (its callees). Uses tree-sitter to extract call expressions from the symbol body. Supports all tree-sitter supported languages. |
+| `find_callers` | `name`, `path?` | Find all call sites of a function or method across the project, with file path and line number. Excludes the definition site. |
+| `find_callees` | `path`, `name` | Find all functions/methods called by a given symbol, with line number per call site. |
 | `get_symbol_body` | `path`, `name` | Get the full source code of a named symbol (function, class, method, etc.) from a file. Uses tree-sitter to precisely extract by byte range. |
 
 All tools parse code with tree-sitter on demand — no caching, always fresh.
+
+## TUI Rendering
+
+All symbol tools include custom `renderCall` and `renderResult` for a polished terminal experience:
+
+- **Tool title** shows the tool name and its parameters inline:
+  `find_definition — myFunction`
+  `list_symbols  src/file.ts  [kind: function]`
+- **Collapsed** (default — press `Ctrl+O` to expand): compact summary:
+  `✓ 42 symbols across 5 files`
+  `✓ 3 definitions for 'myFunction'`
+- **Expanded** (`Ctrl+O`): full detail output
+- **`get_symbol_body`** renders expanded source with syntax highlighting via `highlightCode()`, auto-detecting the language from the file extension
 
 ## Write-time validation
 

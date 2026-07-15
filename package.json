@@ -1,6 +1,6 @@
 {
   "name": "pi-tree-sitter",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Pre-write syntax validation for pi using tree-sitter WASM grammars",
   "license": "EPL-2.0",
   "author": "Marko Kocic <marko@euptera.com>",

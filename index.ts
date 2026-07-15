@@ -11,6 +11,7 @@
  * Inspired by dirge's syntax_validator.rs and semantic adapters.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { highlightCode, getLanguageFromPath } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -21,6 +22,7 @@ import { BALANCE_RULES, checkDelimiterBalance } from "./src/delimiter.js";
 import type { Symbol as Sym, ExtractedFile, LangConfig } from "./src/languages.js";
 import { configForExt } from "./src/languages.js";
 import { findProjectFiles, readFileSafe } from "./src/files.js";
+import { Text } from "@earendil-works/pi-tui";
 
 // ── Error collection (write-time validation) ─────────────────────────────
 
@@ -139,6 +141,45 @@ async function extractAllFiles(dir: string): Promise<Map<string, Sym[]>> {
   return results;
 }
 
+// ── Shared renderCall (generic for all symbol tools) ─────────────────────
+
+function renderSymbolCall(toolName: string) {
+  return (args: Record<string, unknown>, theme: any, context: any) => {
+    const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+    let content = theme.fg("toolTitle", theme.bold(toolName));
+    if (args.name) content += " \u2014 " + theme.fg("accent", String(args.name));
+    if (args.path) content += "  " + theme.fg("muted", "in " + String(args.path));
+    if (args.kind) content += "  [" + theme.fg("dim", "kind: " + String(args.kind)) + "]";
+    text.setText(content);
+    return text;
+  };
+}
+
+// ── Shared renderResult (generic for all symbol tools) ────────────────────
+
+function renderSymbolResult() {
+  return (result: any, { expanded }: any, theme: any) => {
+    const { count, label, name, fileCount } = result.details || {};
+    if (count === undefined) {
+      return new Text(result.content?.[0]?.text || "", 0, 0);
+    }
+    if (expanded) {
+      return new Text(result.content?.[0]?.text || "", 0, 0);
+    }
+    if (count === 0) {
+      return new Text(
+        theme.fg("dim", "No " + label + " found") +
+        (name ? theme.fg("accent", " for '" + name + "'") : ""),
+        0, 0,
+      );
+    }
+    let text = theme.fg("success", "\u2713 ") + count + " " + label;
+    if (name) text += theme.fg("accent", " for '" + name + "'");
+    if (fileCount) text += theme.fg("dim", " across " + fileCount + " file" + (fileCount !== 1 ? "s" : ""));
+    return new Text(text, 0, 0);
+  };
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────
 
 export default async function (pi: ExtensionAPI) {
@@ -185,6 +226,8 @@ export default async function (pi: ExtensionAPI) {
       path: Type.Optional(Type.String({ description: "File path to list symbols from. Omit to list across all project files." })),
       kind: Type.Optional(Type.String({ description: "Filter by symbol kind: function, class, method, interface, type, variable" })),
     }),
+    renderCall: renderSymbolCall("list_symbols"),
+    renderResult: renderSymbolResult(),
     async execute(_toolCallId, params) {
       const filterKind = params.kind?.toLowerCase();
       let results: Map<string, Sym[]>;
@@ -197,7 +240,7 @@ export default async function (pi: ExtensionAPI) {
         results = await extractAllFiles(process.cwd());
       }
       if (results.size === 0) {
-        return { content: [{ type: "text", text: "No symbols found." }], details: {} };
+        return { content: [{ type: "text", text: "No symbols found." }], details: { count: 0, label: "symbols" } };
       }
       if (filterKind) {
         for (const [path, syms] of results) {
@@ -206,7 +249,9 @@ export default async function (pi: ExtensionAPI) {
           else results.delete(path);
         }
       }
-      return { content: [{ type: "text", text: formatResults(results) }], details: {} };
+      let total = 0;
+      for (const syms of results.values()) total += syms.length;
+      return { content: [{ type: "text", text: formatResults(results) }], details: { count: total, label: "symbols", fileCount: results.size } };
     },
   });
 
@@ -220,6 +265,8 @@ export default async function (pi: ExtensionAPI) {
     parameters: Type.Object({
       name: Type.String({ description: "Name of the symbol to find" }),
     }),
+    renderCall: renderSymbolCall("find_definition"),
+    renderResult: renderSymbolResult(),
     async execute(_toolCallId, params) {
       const allResults = await extractAllFiles(process.cwd());
       interface Hit { path: string; sym: Sym }
@@ -230,13 +277,13 @@ export default async function (pi: ExtensionAPI) {
         }
       }
       if (hits.length === 0) {
-        return { content: [{ type: "text", text: "No definition found for '" + params.name + "'" }], details: {} };
+        return { content: [{ type: "text", text: "No definition found for '" + params.name + "'" }], details: { count: 0, label: "definitions", name: params.name } };
       }
       const lines: string[] = ["Found " + hits.length + " definition(s) for '" + params.name + "':"];
       for (const { path, sym } of hits) {
         lines.push("  " + path + ":" + sym.range.startLine + " [" + sym.kind + "] " + sym.signature);
       }
-      return { content: [{ type: "text", text: lines.join("\n") }], details: {} };
+      return { content: [{ type: "text", text: lines.join("\n") }], details: { count: hits.length, label: "definitions", name: params.name } };
     },
   });
 
@@ -251,6 +298,8 @@ export default async function (pi: ExtensionAPI) {
       name: Type.String({ description: "Name of the function/method to find callers of" }),
       path: Type.Optional(Type.String({ description: "Directory to search in (defaults to current working directory)" })),
     }),
+    renderCall: renderSymbolCall("find_callers"),
+    renderResult: renderSymbolResult(),
     async execute(_toolCallId, params) {
       const searchPath = params.path ? resolve(params.path) : process.cwd();
       const callers: string[] = [];
@@ -280,9 +329,9 @@ export default async function (pi: ExtensionAPI) {
       }
 
       if (callers.length === 0) {
-        return { content: [{ type: "text", text: "No callers found for '" + params.name + "'" }], details: {} };
+        return { content: [{ type: "text", text: "No callers found for '" + params.name + "'" }], details: { count: 0, label: "callers", name: params.name } };
       }
-      return { content: [{ type: "text", text: callers.length + " caller(s) for '" + params.name + "':\n" + callers.join("\n") }], details: {} };
+      return { content: [{ type: "text", text: callers.length + " caller(s) for '" + params.name + "':\n" + callers.join("\n") }], details: { count: callers.length, label: "callers", name: params.name } };
     },
   });
 
@@ -297,6 +346,23 @@ export default async function (pi: ExtensionAPI) {
       path: Type.String({ description: "Path to the file containing the symbol" }),
       name: Type.String({ description: "Name of the symbol to retrieve" }),
     }),
+    renderCall: renderSymbolCall("get_symbol_body"),
+    renderResult(result, { expanded }, theme) {
+      if (result.isError || !result.details?.body) {
+        return new Text(theme.fg("error", result.content?.[0]?.text || "Error"), 0, 0);
+      }
+      const { body, name, path, lineCount, language } = result.details;
+      if (expanded) {
+        return new Text(highlightCode(body, language).join("\n"), 0, 0);
+      }
+      return new Text(
+        theme.fg("success", "\u2713 ") +
+        theme.fg("accent", name) +
+        theme.fg("dim", " (" + lineCount + " lines) in ") +
+        theme.fg("muted", path),
+        0, 0,
+      );
+    },
     async execute(_toolCallId, params) {
       const filePath = resolve(params.path);
       const extracted = await extractFile(filePath);
@@ -310,9 +376,10 @@ export default async function (pi: ExtensionAPI) {
             return { content: [{ type: "text", text: "Could not read " + filePath }], details: {} };
           }
           const body = source.slice(sym.range.startByte, sym.range.endByte);
+          const lineCount = body.split('\n').length;
           return {
             content: [{ type: "text", text: "Symbol: " + params.name + " in " + filePath + "\n\n" + body }],
-            details: {},
+            details: { body, name: params.name, path: filePath, lineCount, language: getLanguageFromPath(filePath) },
           };
         }
       }
@@ -331,29 +398,31 @@ export default async function (pi: ExtensionAPI) {
       path: Type.String({ description: "Path to the file containing the symbol" }),
       name: Type.String({ description: "Name of the function/method to analyze" }),
     }),
+    renderCall: renderSymbolCall("find_callees"),
+    renderResult: renderSymbolResult(),
     async execute(_toolCallId, params) {
       const filePath = resolve(params.path);
       const ext = filePath.match(/\.[^.]+$/)?.[0]?.toLowerCase();
-      if (!ext) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: {} };
+      if (!ext) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: { count: 0, label: "callees", name: params.name } };
       const config = configForExt(ext);
-      if (!config) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: {} };
+      if (!config) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: { count: 0, label: "callees", name: params.name } };
       const entry = LANGUAGE_MAP[ext];
-      if (!entry) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: {} };
+      if (!entry) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: { count: 0, label: "callees", name: params.name } };
       await ensureParser();
       const lang = await loadGrammar(entry);
-      if (!lang) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: {} };
+      if (!lang) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: { count: 0, label: "callees", name: params.name } };
       const source = await readFileSafe(filePath);
-      if (source === null) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: {} };
+      if (source === null) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: { count: 0, label: "callees", name: params.name } };
 
       const extracted = config.extract(source, lang);
       for (const sym of extracted.symbols) {
         if (sym.name === params.name) {
           const callees = config.findCallees(source, lang, sym.range);
           if (callees.length === 0) {
-            return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: {} };
+            return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: { count: 0, label: "callees", name: params.name } };
           }
-          const lines = callees.map(c => "  " + c);
-          return { content: [{ type: "text", text: "Callees of " + params.name + " in " + filePath + ":\n" + lines.join("\n") }], details: {} };
+          const lines = callees.map(c => "  " + c.line + "  " + c.name);
+          return { content: [{ type: "text", text: "Callees of " + params.name + " in " + filePath + ":\n" + lines.join("\n") }], details: { count: callees.length, label: "callees", name: params.name } };
         }
       }
       return { content: [{ type: "text", text: "Symbol '" + params.name + "' not found in " + filePath }], details: {} };
