@@ -333,6 +333,12 @@ const rsExtract = (source: string, lang: Language): ExtractedFile => {
         }
         break;
       }
+      case "const_item":
+      case "static_item": {
+        const name = rsIdentChild(item, source);
+        if (name) symbols.push({ kind: "variable", name, range: nodeRange(item), signature: sig(item, source), isExported: rsIsExported(item), parentClass: null });
+        break;
+      }
     }
   }
 
