@@ -322,7 +322,7 @@ export default async function (pi: ExtensionAPI) {
         for (const sym of extracted.symbols) {
           if (sym.name === params.name) continue;
           const callees = config.findCallees(source, lang, sym.range);
-          if (callees.indexOf(params.name) !== -1) {
+          if (callees.some(c => c.name === params.name)) {
             callers.push("  " + file + ":" + sym.range.startLine + " [" + sym.kind + "] " + sym.name);
           }
         }

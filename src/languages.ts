@@ -512,6 +512,78 @@ const goCallees = (source: string, lang: Language, range: ByteRange): string[] =
 
 // ── Kotlin ───────────────────────────────────────────────────────────────
 
+/** Walk a class_body / enum_class_body, extracting member symbols. */
+function ktWalkClassBody(body: Node, source: string, symbols: Symbol[], parentClass: string): void {
+  for (let i = 0; i < body.namedChildCount; i++) {
+    const child = body.namedChild(i);
+    if (!child) continue;
+    switch (child.type) {
+      case "function_declaration": {
+        const nn = child.childForFieldName("name");
+        if (nn) symbols.push({ kind: "method", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass });
+        break;
+      }
+      case "property_declaration": {
+        const nn = child.childForFieldName("name");
+        if (nn) symbols.push({ kind: "variable", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass });
+        break;
+      }
+      case "companion_object": {
+        const nn = child.childForFieldName("name");
+        const compName = nn ? nodeText(nn, source) : "Companion";
+        symbols.push({ kind: "class", name: compName, range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass });
+        ktWalkClassBodies(child, source, symbols, compName);
+        break;
+      }
+      case "class_declaration": {
+        const nn = child.childForFieldName("name");
+        if (!nn) break;
+        const name = nodeText(nn, source);
+        symbols.push({ kind: "class", name, range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass });
+        ktWalkClassBodies(child, source, symbols, name);
+        break;
+      }
+      case "object_declaration": {
+        const nn = child.childForFieldName("name");
+        if (!nn) break;
+        const name = nodeText(nn, source);
+        symbols.push({ kind: "class", name, range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass });
+        ktWalkClassBodies(child, source, symbols, name);
+        break;
+      }
+      case "type_alias": {
+        const nn = child.childForFieldName("name");
+        if (nn) symbols.push({ kind: "type", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass });
+        break;
+      }
+    }
+  }
+}
+
+/** Find class_body and enum_class_body children of a node and walk them. */
+function ktWalkClassBodies(node: Node, source: string, symbols: Symbol[], parentClass: string): void {
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const body = node.namedChild(i);
+    if (body && (body.type === "class_body" || body.type === "enum_class_body")) {
+      ktWalkClassBody(body, source, symbols, parentClass);
+    }
+  }
+}
+
+/** Check if a class_declaration node is actually an interface by examining the keyword token. */
+function ktIsInterface(node: Node, source: string): boolean {
+  // The first keyword after optional modifiers distinguishes class vs interface.
+  // Scan children for unnamed tokens that are "interface", "class", or "enum".
+  for (let i = 0; i < node.childCount; i++) {
+    const c = node.child(i);
+    if (!c || c.isNamed) continue;
+    const token = source.slice(c.startIndex, c.endIndex);
+    if (token === "interface") return true;
+    if (token === "class" || token === "enum") return false;
+  }
+  return false;
+}
+
 const ktExtract = (source: string, lang: Language): ExtractedFile => {
   const p = parseSource(source, lang);
   const root = p.parse(source)!.rootNode;
@@ -533,22 +605,27 @@ const ktExtract = (source: string, lang: Language): ExtractedFile => {
         const nn = child.childForFieldName("name");
         if (!nn) break;
         const name = nodeText(nn, source);
-        symbols.push({ kind: "class", name, range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
-        break;
-      }
-      case "interface_declaration": {
-        const nn = child.childForFieldName("name");
-        if (nn) symbols.push({ kind: "interface", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
+        const kind: SymbolKind = ktIsInterface(child, source) ? "interface" : "class";
+        symbols.push({ kind, name, range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
+        ktWalkClassBodies(child, source, symbols, name);
         break;
       }
       case "object_declaration": {
         const nn = child.childForFieldName("name");
-        if (nn) symbols.push({ kind: "class", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
+        if (!nn) break;
+        const name = nodeText(nn, source);
+        symbols.push({ kind: "class", name, range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
+        ktWalkClassBodies(child, source, symbols, name);
         break;
       }
       case "property_declaration": {
         const nn = child.childForFieldName("name");
         if (nn) symbols.push({ kind: "variable", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
+        break;
+      }
+      case "type_alias": {
+        const nn = child.childForFieldName("name");
+        if (nn) symbols.push({ kind: "type", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
         break;
       }
     }
@@ -557,8 +634,11 @@ const ktExtract = (source: string, lang: Language): ExtractedFile => {
   return { symbols, warnings };
 };
 
-const ktCallees = (source: string, lang: Language, range: ByteRange): string[] =>
-  queryCaptures(source, lang, "(call_expression function: (identifier) @callee)", "callee", range);
+const ktCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> => {
+  const simple = queryCaptures(source, lang, "(call_expression (expression (primary_expression (identifier) @callee)))", "callee", range);
+  const member = queryCaptures(source, lang, "(call_expression (navigation_expression (navigation_suffix (simple_identifier) @callee)))", "callee", range);
+  return [...simple, ...member];
+};
 
 // ── Lua ──────────────────────────────────────────────────────────────────
 
