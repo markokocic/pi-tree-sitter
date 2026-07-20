@@ -14,6 +14,20 @@ export interface GrammarEntry {
   wasm: string;
 }
 
+/** Callback for user-facing notifications about grammar downloads. */
+export type NotifyFn = (message: string, level: "info" | "error") => void;
+
+function formatGrammarName(entry: GrammarEntry): string {
+  const wasmMatch = entry.wasm.match(/tree-sitter-(\w+)\.wasm/);
+  if (wasmMatch) {
+    const name = wasmMatch[1];
+    return name.charAt(0).toUpperCase() + name.slice(1);
+  }
+  // Fallback: derive from package name
+  const name = entry.pkg.replace(/^@.+\//, '').replace(/^tree-sitter-/, '');
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
 // ── Grammar map ─────────────────────────────────────────────────────────
 
 export const LANGUAGE_MAP: Record<string, GrammarEntry> = {
@@ -146,7 +160,7 @@ async function fetchWithRetry(url: string, options: RequestInit = {}): Promise<R
  * - On network error during revalidation → keep cache, touch date (retry in 30 days).
  * - Fresh downloads retry up to MAX_FETCH_RETRIES times with exponential backoff.
  */
-export async function loadGrammar(entry: GrammarEntry): Promise<Language | null> {
+export async function loadGrammar(entry: GrammarEntry, notify?: NotifyFn): Promise<Language | null> {
   const key = `${entry.pkg}/${entry.wasm}`;
   const cached = grammarCache.get(key);
   if (cached !== undefined) return cached;
@@ -208,10 +222,12 @@ export async function loadGrammar(entry: GrammarEntry): Promise<Language | null>
         } else if (res.ok) {
           wasmBytes = new Uint8Array(await res.arrayBuffer());
           const newEtag = res.headers.get("etag") || "";
-          console.log(`[pi-tree-sitter] updated ${key} (${(wasmBytes.length / 1024).toFixed(0)} KB)`);
           await saveCache(wasmBytes, newEtag);
           const lang = await tryLoad(wasmBytes);
-          if (lang) return lang;
+          if (lang) {
+            notify?.(`Tree-sitter grammar for ${formatGrammarName(entry)} updated`, "info");
+            return lang;
+          }
         } else {
           // Unexpected status (429, 500, etc.) — keep cache, retry in 30 days
           await touchDate();
@@ -231,22 +247,19 @@ export async function loadGrammar(entry: GrammarEntry): Promise<Language | null>
   for (let attempt = 1; attempt <= MAX_FETCH_RETRIES; attempt++) {
     try {
       const url = `${WASM_CDN}/${key}`;
-      console.log(`[pi-tree-sitter] downloading ${key} from CDN...`);
       const res = await fetchWithRetry(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       wasmBytes = new Uint8Array(await res.arrayBuffer());
       const etag = res.headers.get("etag") || "";
-      console.log(`[pi-tree-sitter] ${key} downloaded (${(wasmBytes.length / 1024).toFixed(0)} KB)`);
       const lang = await Language.load(wasmBytes).catch(() => null);
       if (lang) {
         await saveCache(wasmBytes, etag);
         grammarCache.set(key, lang);
+        notify?.(`Tree-sitter grammar for ${formatGrammarName(entry)} ready`, "info");
         return lang;
       }
       // Downloaded bytes are invalid — try again
-      console.log(`[pi-tree-sitter] ${key} downloaded but invalid, retrying (${attempt}/${MAX_FETCH_RETRIES})`);
     } catch (err) {
-      console.log(`[pi-tree-sitter] failed to download ${key} (attempt ${attempt}/${MAX_FETCH_RETRIES}): ${err instanceof Error ? err.message : String(err)}`);
       if (attempt < MAX_FETCH_RETRIES) {
         const delay = 1000 * Math.pow(2, attempt - 1);
         await new Promise(r => setTimeout(r, delay));
@@ -255,6 +268,7 @@ export async function loadGrammar(entry: GrammarEntry): Promise<Language | null>
   }
 
   grammarCache.set(key, null);
+  notify?.(`Failed to load tree-sitter grammar for ${formatGrammarName(entry)}`, "error");
   return null;
 }
 

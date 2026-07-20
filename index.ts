@@ -17,7 +17,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Parser, type Tree, type Node as TSNode } from "web-tree-sitter";
 
-import { ensureParser, loadGrammar, LANGUAGE_MAP } from "./src/grammar.js";
+import { ensureParser, loadGrammar, LANGUAGE_MAP, type NotifyFn } from "./src/grammar.js";
 import { BALANCE_RULES, checkDelimiterBalance } from "./src/delimiter.js";
 import type { Symbol as Sym, ExtractedFile, LangConfig } from "./src/languages.js";
 import { configForExt } from "./src/languages.js";
@@ -52,14 +52,14 @@ function collectErrors(tree: Tree, source: string): string[] {
 }
 
 /** Validate content for write/edit blocking. Returns null = clean. */
-async function validateContent(path: string, content: string): Promise<string | null> {
+async function validateContent(path: string, content: string, notify?: NotifyFn): Promise<string | null> {
   const ext = path.match(/\.[^.]+$/)?.[0]?.toLowerCase();
   if (!ext) return null;
 
   const entry = LANGUAGE_MAP[ext];
   if (entry) {
     await ensureParser();
-    const lang = await loadGrammar(entry);
+    const lang = await loadGrammar(entry, notify);
     if (lang) {
       const parser = new Parser();
       parser.setLanguage(lang);
@@ -114,7 +114,7 @@ function formatResults(results: Map<string, Sym[]>): string {
   return parts.join("\n");
 }
 
-async function extractFile(filePath: string): Promise<ExtractedFile | null> {
+async function extractFile(filePath: string, notify?: NotifyFn): Promise<ExtractedFile | null> {
   const ext = filePath.match(/\.[^.]+$/)?.[0]?.toLowerCase();
   if (!ext) return null;
   const config = configForExt(ext);
@@ -124,16 +124,16 @@ async function extractFile(filePath: string): Promise<ExtractedFile | null> {
   const source = await readFileSafe(filePath);
   if (source === null) return null;
   await ensureParser();
-  const lang = await loadGrammar(entry);
+  const lang = await loadGrammar(entry, notify);
   if (!lang) return null;
   return config.extract(source, lang);
 }
 
-async function extractAllFiles(dir: string): Promise<Map<string, Sym[]>> {
+async function extractAllFiles(dir: string, notify?: NotifyFn): Promise<Map<string, Sym[]>> {
   const results = new Map<string, Sym[]>();
   const files = await findProjectFiles(dir);
   for (const file of files) {
-    const extracted = await extractFile(file);
+    const extracted = await extractFile(file, notify);
     if (extracted && extracted.symbols.length > 0) {
       results.set(file, extracted.symbols);
     }
@@ -185,9 +185,10 @@ function renderSymbolResult() {
 export default async function (pi: ExtensionAPI) {
   // ── Write/Edit validation (existing behavior) ────────────────────────
   pi.on("tool_call", async (event, ctx) => {
+    const notify = ctx.ui.notify.bind(ctx.ui);
     if (event.toolName === "write") {
       const input = event.input as { path: string; content: string };
-      const err = await validateContent(input.path, input.content);
+      const err = await validateContent(input.path, input.content, notify);
       if (err) return { block: true, reason: err };
       return;
     }
@@ -207,7 +208,7 @@ export default async function (pi: ExtensionAPI) {
           if (idx === -1) continue;
           result = result.slice(0, idx) + edit.newText + result.slice(idx + edit.oldText.length);
         }
-        const err = await validateContent(input.path, result);
+        const err = await validateContent(input.path, result, notify);
         if (err) return { block: true, reason: err };
       } catch {
         // File doesn't exist — let edit tool handle the error
@@ -228,16 +229,17 @@ export default async function (pi: ExtensionAPI) {
     }),
     renderCall: renderSymbolCall("list_symbols"),
     renderResult: renderSymbolResult(),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const filterKind = params.kind?.toLowerCase();
+      const notify = ctx?.ui?.notify?.bind(ctx.ui);
       let results: Map<string, Sym[]>;
       if (params.path) {
         const filePath = resolve(params.path);
-        const extracted = await extractFile(filePath);
+        const extracted = await extractFile(filePath, notify);
         results = new Map();
         if (extracted) results.set(filePath, extracted.symbols);
       } else {
-        results = await extractAllFiles(process.cwd());
+        results = await extractAllFiles(process.cwd(), notify);
       }
       if (results.size === 0) {
         return { content: [{ type: "text", text: "No symbols found." }], details: { count: 0, label: "symbols" } };
@@ -267,8 +269,8 @@ export default async function (pi: ExtensionAPI) {
     }),
     renderCall: renderSymbolCall("find_definition"),
     renderResult: renderSymbolResult(),
-    async execute(_toolCallId, params) {
-      const allResults = await extractAllFiles(process.cwd());
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const allResults = await extractAllFiles(process.cwd(), ctx?.ui?.notify?.bind(ctx.ui));
       interface Hit { path: string; sym: Sym }
       const hits: Hit[] = [];
       for (const [path, syms] of allResults) {
@@ -300,7 +302,8 @@ export default async function (pi: ExtensionAPI) {
     }),
     renderCall: renderSymbolCall("find_callers"),
     renderResult: renderSymbolResult(),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const notify = ctx?.ui?.notify?.bind(ctx.ui);
       const searchPath = params.path ? resolve(params.path) : process.cwd();
       const callers: string[] = [];
 
@@ -313,7 +316,7 @@ export default async function (pi: ExtensionAPI) {
         const entry = LANGUAGE_MAP[ext];
         if (!entry) continue;
         await ensureParser();
-        const lang = await loadGrammar(entry);
+        const lang = await loadGrammar(entry, notify);
         if (!lang) continue;
         const source = await readFileSafe(file);
         if (source === null) continue;
@@ -363,9 +366,9 @@ export default async function (pi: ExtensionAPI) {
         0, 0,
       );
     },
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const filePath = resolve(params.path);
-      const extracted = await extractFile(filePath);
+      const extracted = await extractFile(filePath, ctx?.ui?.notify?.bind(ctx.ui));
       if (!extracted) {
         return { content: [{ type: "text", text: "Could not parse " + filePath }], details: {} };
       }
@@ -400,7 +403,8 @@ export default async function (pi: ExtensionAPI) {
     }),
     renderCall: renderSymbolCall("find_callees"),
     renderResult: renderSymbolResult(),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const notify = ctx?.ui?.notify?.bind(ctx.ui);
       const filePath = resolve(params.path);
       const ext = filePath.match(/\.[^.]+$/)?.[0]?.toLowerCase();
       if (!ext) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: { count: 0, label: "callees", name: params.name } };
@@ -409,7 +413,7 @@ export default async function (pi: ExtensionAPI) {
       const entry = LANGUAGE_MAP[ext];
       if (!entry) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: { count: 0, label: "callees", name: params.name } };
       await ensureParser();
-      const lang = await loadGrammar(entry);
+      const lang = await loadGrammar(entry, notify);
       if (!lang) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: { count: 0, label: "callees", name: params.name } };
       const source = await readFileSafe(filePath);
       if (source === null) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: { count: 0, label: "callees", name: params.name } };
