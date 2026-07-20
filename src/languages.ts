@@ -830,12 +830,66 @@ const swiftCallees = (source: string, lang: Language, range: ByteRange): string[
 
 // ── Java ─────────────────────────────────────────────────────────────────
 
-function javaFuncName(node: Node, source: string): string | null {
-  // method_declaration: name is in the `name` field of the declarator
-  const declarator = node.childForFieldName("declarator");
-  if (!declarator) return null;
-  const nn = declarator.childForFieldName("name");
-  return nn ? nodeText(nn, source) : null;
+/** Walk a Java class_body, extracting member declarations. */
+function javaWalkClassBody(body: Node, source: string, symbols: Symbol[], parentClass: string): void {
+  for (let i = 0; i < body.namedChildCount; i++) {
+    const child = body.namedChild(i);
+    if (!child) continue;
+    switch (child.type) {
+      case "method_declaration": {
+        const nn = child.childForFieldName("name");
+        if (nn) symbols.push({ kind: "method", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass });
+        break;
+      }
+      case "constructor_declaration": {
+        const nn = child.childForFieldName("name");
+        if (nn) symbols.push({ kind: "method", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass });
+        break;
+      }
+      case "field_declaration": {
+        for (let j = 0; j < child.namedChildCount; j++) {
+          const decl = child.namedChild(j);
+          if (decl && decl.type === "variable_declarator") {
+            const nn = decl.childForFieldName("name");
+            if (nn) symbols.push({ kind: "variable", name: nodeText(nn, source), range: nodeRange(decl), signature: sig(child, source), isExported: true, parentClass });
+          }
+        }
+        break;
+      }
+      case "class_declaration": {
+        const nn = child.childForFieldName("name");
+        if (!nn) break;
+        const name = nodeText(nn, source);
+        symbols.push({ kind: "class", name, range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass });
+        const cb = child.childForFieldName("body");
+        if (cb) javaWalkClassBody(cb, source, symbols, name);
+        break;
+      }
+      case "interface_declaration": {
+        const nn = child.childForFieldName("name");
+        if (nn) symbols.push({ kind: "interface", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass });
+        break;
+      }
+      case "enum_declaration": {
+        const nn = child.childForFieldName("name");
+        if (!nn) break;
+        const name = nodeText(nn, source);
+        symbols.push({ kind: "class", name, range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass });
+        const cb = child.childForFieldName("body");
+        if (cb) javaWalkClassBody(cb, source, symbols, name);
+        break;
+      }
+      case "record_declaration": {
+        const nn = child.childForFieldName("name");
+        if (!nn) break;
+        const name = nodeText(nn, source);
+        symbols.push({ kind: "class", name, range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass });
+        const cb = child.childForFieldName("body");
+        if (cb) javaWalkClassBody(cb, source, symbols, name);
+        break;
+      }
+    }
+  }
 }
 
 const javaExtract = (source: string, lang: Language): ExtractedFile => {
@@ -854,6 +908,8 @@ const javaExtract = (source: string, lang: Language): ExtractedFile => {
         if (!nn) break;
         const name = nodeText(nn, source);
         symbols.push({ kind: "class", name, range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
+        const body = child.childForFieldName("body");
+        if (body) javaWalkClassBody(body, source, symbols, name);
         break;
       }
       case "interface_declaration": {
@@ -864,7 +920,24 @@ const javaExtract = (source: string, lang: Language): ExtractedFile => {
       case "enum_declaration": {
         const nn = child.childForFieldName("name");
         if (!nn) break;
-        symbols.push({ kind: "class", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
+        const name = nodeText(nn, source);
+        symbols.push({ kind: "class", name, range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
+        const body = child.childForFieldName("body");
+        if (body) javaWalkClassBody(body, source, symbols, name);
+        break;
+      }
+      case "record_declaration": {
+        const nn = child.childForFieldName("name");
+        if (!nn) break;
+        const name = nodeText(nn, source);
+        symbols.push({ kind: "class", name, range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
+        const body = child.childForFieldName("body");
+        if (body) javaWalkClassBody(body, source, symbols, name);
+        break;
+      }
+      case "annotation_type_declaration": {
+        const nn = child.childForFieldName("name");
+        if (nn) symbols.push({ kind: "interface", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
         break;
       }
     }
@@ -872,7 +945,7 @@ const javaExtract = (source: string, lang: Language): ExtractedFile => {
   return { symbols, warnings };
 };
 
-const javaCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const javaCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(method_invocation name: (identifier) @callee)", "callee", range);
 
 // ── Ruby ─────────────────────────────────────────────────────────────────
