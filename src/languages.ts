@@ -500,11 +500,29 @@ const goExtract = (source: string, lang: Language): ExtractedFile => {
         }
         break;
       }
+      case "var_declaration":
+      case "const_declaration":
+        goWalkSpecs(child, source, symbols);
+        break;
     }
   }
 
   return { symbols, warnings };
 };
+
+/** Walk var_spec / const_spec children inside a var_declaration or const_declaration. */
+function goWalkSpecs(node: Node, source: string, symbols: Symbol[]): void {
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const child = node.namedChild(i);
+    if (!child) continue;
+    if (child.type === "var_spec_list" || child.type === "const_spec_list") {
+      goWalkSpecs(child, source, symbols);
+    } else if (child.type === "var_spec" || child.type === "const_spec") {
+      const nn = child.childForFieldName("name");
+      if (nn) symbols.push({ kind: "variable", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: goIsExported(nodeText(nn, source)), parentClass: null });
+    }
+  }
+}
 
 function goIsExported(name: string): boolean {
   return name.length > 0 && name[0] === name[0].toUpperCase();
