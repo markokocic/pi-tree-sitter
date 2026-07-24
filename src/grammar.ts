@@ -46,7 +46,6 @@ export const LANGUAGE_MAP: Record<string, GrammarEntry> = {
   ".java": { pkg: "tree-sitter-java", wasm: "tree-sitter-java.wasm" },
   ".rb":   { pkg: "tree-sitter-ruby", wasm: "tree-sitter-ruby.wasm" },
   ".c":    { pkg: "tree-sitter-c", wasm: "tree-sitter-c.wasm" },
-  ".h":    { pkg: "tree-sitter-c", wasm: "tree-sitter-c.wasm" },
   ".cpp":  { pkg: "tree-sitter-cpp", wasm: "tree-sitter-cpp.wasm" },
   ".cc":   { pkg: "tree-sitter-cpp", wasm: "tree-sitter-cpp.wasm" },
   ".cxx":  { pkg: "tree-sitter-cpp", wasm: "tree-sitter-cpp.wasm" },

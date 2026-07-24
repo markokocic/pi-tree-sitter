@@ -8,6 +8,7 @@
  * No adapter interface, no registry — just a flat array + lookup.
  */
 import { Parser, Query, type Language, type Node } from "web-tree-sitter";
+import { readFileSync } from "node:fs";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -31,7 +32,17 @@ export interface Symbol {
 
 export interface ExtractedFile {
   symbols: Symbol[];
+  imports: Import[];
+  exports: string[];
   warnings: string[];
+}
+
+export type ImportKind = "header" | "module" | "qualified";
+
+export interface Import {
+  names: string[];
+  source: string;
+  kind: ImportKind;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -59,6 +70,21 @@ function parseSource(source: string, lang: Language): Parser {
   const p = new Parser();
   p.setLanguage(lang);
   return p;
+}
+
+/** Strip C/C++ comments and string literals for .h sniffing. */
+function stripCComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, " ")    // block comments
+    .replace(/\/\/.*/g, " ")                 // line comments
+    .replace(/"(?:[^"\\]|\\.)*"/g, " ")  // double-quoted strings
+    .replace(/'(?:[^'\\]|\\.)*'/g, " ");    // char literals
+}
+
+function readFileSafe(path: string): string | null {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch { return null; }
 }
 
 /** Run a tree-sitter query and return named node captures. */
@@ -165,7 +191,7 @@ const tsExtract = (source: string, lang: Language): ExtractedFile => {
     }
   }
 
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
 function isTsExported(node: Node): boolean {
@@ -213,7 +239,7 @@ function tsClassBody(body: Node, source: string, symbols: Symbol[], className: s
   }
 }
 
-const tsCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const tsCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(call_expression function: (identifier) @callee)", "callee", range);
 
 // ── Python ───────────────────────────────────────────────────────────────
@@ -258,7 +284,7 @@ const pyExtract = (source: string, lang: Language): ExtractedFile => {
     }
   }
 
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
 function pyIsExported(name: string): boolean {
@@ -282,7 +308,7 @@ function pyClassBody(body: Node, source: string, symbols: Symbol[], className: s
   }
 }
 
-const pyCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const pyCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(call function: (identifier) @callee)\n(call function: (attribute attribute: (identifier) @callee))", "callee", range);
 
 // ── Rust ─────────────────────────────────────────────────────────────────
@@ -342,7 +368,7 @@ const rsExtract = (source: string, lang: Language): ExtractedFile => {
     }
   }
 
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
 function rsIsExported(node: Node): boolean {
@@ -388,7 +414,7 @@ function rsImplBody(body: Node, source: string, symbols: Symbol[], target: strin
   }
 }
 
-const rsCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const rsCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, [
     "(call_expression function: (identifier) @callee)",
     "(call_expression function: (field_expression field: (field_identifier) @callee))",
@@ -442,10 +468,10 @@ const cljExtract = (source: string, lang: Language): ExtractedFile => {
     }
   }
 
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
-const cljCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const cljCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(list_lit (sym_lit) @callee)", "callee", range);
 
 // ── Go ───────────────────────────────────────────────────────────────────
@@ -507,7 +533,7 @@ const goExtract = (source: string, lang: Language): ExtractedFile => {
     }
   }
 
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
 /** Walk var_spec / const_spec children inside a var_declaration or const_declaration. */
@@ -528,7 +554,7 @@ function goIsExported(name: string): boolean {
   return name.length > 0 && name[0] === name[0].toUpperCase();
 }
 
-const goCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const goCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, [
     "(call_expression function: (identifier) @callee)",
     "(call_expression function: (selector_expression field: (field_identifier) @callee))",
@@ -655,7 +681,7 @@ const ktExtract = (source: string, lang: Language): ExtractedFile => {
     }
   }
 
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
 const ktCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> => {
@@ -691,10 +717,10 @@ const luaExtract = (source: string, lang: Language): ExtractedFile => {
     }
   }
 
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
-const luaCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const luaCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(function_call function: (identifier) @callee)", "callee", range);
 
 // ── PHP ──────────────────────────────────────────────────────────────────
@@ -747,10 +773,10 @@ const phpExtract = (source: string, lang: Language): ExtractedFile => {
     }
   }
 
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
-const phpCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const phpCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(function_call_expression function: (name) @callee)", "callee", range);
 
 // ── Scala ────────────────────────────────────────────────────────────────
@@ -792,10 +818,10 @@ const scalaExtract = (source: string, lang: Language): ExtractedFile => {
     }
   }
 
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
-const scalaCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const scalaCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(call_expression function: (identifier) @callee)", "callee", range);
 
 // ── Swift ────────────────────────────────────────────────────────────────
@@ -846,10 +872,10 @@ const swiftExtract = (source: string, lang: Language): ExtractedFile => {
     }
   }
 
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
-const swiftCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const swiftCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(call_expression function: (identifier) @callee)", "callee", range);
 
 // ── Java ─────────────────────────────────────────────────────────────────
@@ -966,7 +992,7 @@ const javaExtract = (source: string, lang: Language): ExtractedFile => {
       }
     }
   }
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
 const javaCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
@@ -1010,10 +1036,10 @@ const rbExtract = (source: string, lang: Language): ExtractedFile => {
       }
     }
   }
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
-const rbCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const rbCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(call method: (identifier) @callee)", "callee", range);
 
 // ── C ───────────────────────────────────────────────────────────────────-
@@ -1070,10 +1096,10 @@ const cExtract = (source: string, lang: Language): ExtractedFile => {
       }
     }
   }
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
-const cCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const cCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(call_expression function: (identifier) @callee)", "callee", range);
 
 // ── C++ ──────────────────────────────────────────────────────────────────
@@ -1113,10 +1139,10 @@ const cppExtract = (source: string, lang: Language): ExtractedFile => {
       }
     }
   }
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
-const cppCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const cppCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(call_expression function: (identifier) @callee)", "callee", range);
 
 // ── Zig ──────────────────────────────────────────────────────────────────
@@ -1144,10 +1170,10 @@ const zigExtract = (source: string, lang: Language): ExtractedFile => {
       if (nn) symbols.push({ kind: "class", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
     }
   }
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
-const zigCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const zigCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(call_expression function: (identifier) @callee)", "callee", range);
 
 // ── Elixir ───────────────────────────────────────────────────────────────
@@ -1231,10 +1257,10 @@ const elixirExtract = (source: string, lang: Language): ExtractedFile => {
   const warnings: string[] = [];
   if (root.hasError) warnings.push("tree-sitter reported syntax errors");
   elixirWalkBlock(root, source, symbols, null);
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
-const elixirCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const elixirCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(call target: (identifier) @callee)", "callee", range);
 
 // ── C# ───────────────────────────────────────────────────────────────────
@@ -1288,10 +1314,10 @@ const csExtract = (source: string, lang: Language): ExtractedFile => {
       }
     }
   }
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
-const csCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const csCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(invocation_expression function: (identifier) @callee)", "callee", range);
 
 // ── Dart ─────────────────────────────────────────────────────────────────
@@ -1348,10 +1374,10 @@ const dartExtract = (source: string, lang: Language): ExtractedFile => {
       }
     }
   }
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
-const dartCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const dartCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(function_call function: (identifier) @callee)", "callee", range);
 
 // ── Bash ─────────────────────────────────────────────────────────────────
@@ -1371,10 +1397,10 @@ const bashExtract = (source: string, lang: Language): ExtractedFile => {
       if (nn) symbols.push({ kind: "function", name: nodeText(nn, source), range: nodeRange(child), signature: sig(child, source), isExported: true, parentClass: null });
     }
   }
-  return { symbols, warnings };
+  return { symbols, imports: [], exports: [], warnings };
 };
 
-const bashCallees = (source: string, lang: Language, range: ByteRange): string[] =>
+const bashCallees = (source: string, lang: Language, range: ByteRange): Array<{ name: string; line: number }> =>
   queryCaptures(source, lang, "(command name: (command_name) @callee)", "callee", range);
 
 // ── Registry ─────────────────────────────────────────────────────────────
@@ -1393,7 +1419,7 @@ const LANGUAGES: LangConfig[] = [
   { extensions: [".java"], extract: javaExtract, findCallees: javaCallees },
   { extensions: [".rb"], extract: rbExtract, findCallees: rbCallees },
   { extensions: [".c", ".h"], extract: cExtract, findCallees: cCallees },
-  { extensions: [".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"], extract: cppExtract, findCallees: cppCallees },
+  { extensions: [".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h"], extract: cppExtract, findCallees: cppCallees },
   { extensions: [".sh", ".bash"], extract: bashExtract, findCallees: bashCallees },
   { extensions: [".zig"], extract: zigExtract, findCallees: zigCallees },
   { extensions: [".ex", ".exs"], extract: elixirExtract, findCallees: elixirCallees },
@@ -1408,6 +1434,23 @@ export function configForExt(ext: string): LangConfig | null {
     if (c.extensions.some(e => e.toLowerCase() === key)) return c;
   }
   return null;
+}
+
+/** Find the config for a file, with .h content sniffing for C vs C++. */
+export function configForFile(filePath: string, source?: string): LangConfig | null {
+  const ext = filePath.match(/\.[^.]+$/)?.[0]?.toLowerCase();
+  if (!ext) return null;
+  if (ext !== ".h") return configForExt(ext);
+
+  const content = source ?? readFileSafe(filePath);
+  if (!content) return configForExt(".c");
+
+  // Sniff for C++-only tokens
+  const cleaned = stripCComments(content);
+  if (/\b(class|namespace)\b|::|template\s*</.test(cleaned)) {
+    return configForExt(".cpp");
+  }
+  return configForExt(".c");
 }
 
 /** All recognized extensions (with leading dot). */

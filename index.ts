@@ -20,7 +20,7 @@ import { Parser, type Tree, type Node as TSNode } from "web-tree-sitter";
 import { ensureParser, loadGrammar, LANGUAGE_MAP, type NotifyFn } from "./src/grammar.js";
 import { BALANCE_RULES, checkDelimiterBalance } from "./src/delimiter.js";
 import type { Symbol as Sym, ExtractedFile, LangConfig } from "./src/languages.js";
-import { configForExt } from "./src/languages.js";
+import { configForExt, configForFile } from "./src/languages.js";
 import { findProjectFiles, readFileSafe } from "./src/files.js";
 import { Text } from "@earendil-works/pi-tui";
 
@@ -117,12 +117,13 @@ function formatResults(results: Map<string, Sym[]>): string {
 async function extractFile(filePath: string, notify?: NotifyFn): Promise<ExtractedFile | null> {
   const ext = filePath.match(/\.[^.]+$/)?.[0]?.toLowerCase();
   if (!ext) return null;
-  const config = configForExt(ext);
-  if (!config) return null;
-  const entry = LANGUAGE_MAP[ext];
-  if (!entry) return null;
   const source = await readFileSafe(filePath);
   if (source === null) return null;
+  const config = configForFile(filePath, source);
+  if (!config) return null;
+  const grammarExt = config.extensions[0];
+  const entry = LANGUAGE_MAP[grammarExt];
+  if (!entry) return null;
   await ensureParser();
   const lang = await loadGrammar(entry, notify);
   if (!lang) return null;
@@ -311,9 +312,10 @@ export default async function (pi: ExtensionAPI) {
       for (const file of files) {
         const ext = file.match(/\.[^.]+$/)?.[0]?.toLowerCase();
         if (!ext) continue;
-        const config = configForExt(ext);
+        const config = configForFile(file);
         if (!config) continue;
-        const entry = LANGUAGE_MAP[ext];
+        const grammarExt = config.extensions[0];
+        const entry = LANGUAGE_MAP[grammarExt];
         if (!entry) continue;
         await ensureParser();
         const lang = await loadGrammar(entry, notify);
@@ -408,9 +410,10 @@ export default async function (pi: ExtensionAPI) {
       const filePath = resolve(params.path);
       const ext = filePath.match(/\.[^.]+$/)?.[0]?.toLowerCase();
       if (!ext) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: { count: 0, label: "callees", name: params.name } };
-      const config = configForExt(ext);
+      const config = configForFile(filePath);
       if (!config) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: { count: 0, label: "callees", name: params.name } };
-      const entry = LANGUAGE_MAP[ext];
+      const grammarExt = config.extensions[0];
+      const entry = LANGUAGE_MAP[grammarExt];
       if (!entry) return { content: [{ type: "text", text: "No callees found for '" + params.name + "'" }], details: { count: 0, label: "callees", name: params.name } };
       await ensureParser();
       const lang = await loadGrammar(entry, notify);
