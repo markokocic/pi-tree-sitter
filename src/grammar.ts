@@ -97,11 +97,11 @@ export const LANGUAGE_MAP: Record<string, GrammarEntry> = {
   // Lua, Swift, YAML, and Vue don't publish compatible WASM in their individual packages
   ".lua":    { pkg: "tree-sitter-wasms", wasm: "out/tree-sitter-lua.wasm" },
   ".swift":  { pkg: "tree-sitter-wasms", wasm: "out/tree-sitter-swift.wasm" },
-  // tree-sitter-wasms' TOML binary uses the legacy Emscripten format and cannot be
-  // loaded by current web-tree-sitter releases. This package ships a current build.
+  // tree-sitter-wasms' TOML and YAML binaries use the legacy Emscripten format
+  // and cannot be loaded by current web-tree-sitter releases. These packages ship current builds.
   ".toml":   { pkg: "@tree-sitter-grammars/tree-sitter-toml", wasm: "tree-sitter-toml.wasm" },
-  ".yaml":   { pkg: "tree-sitter-wasms", wasm: "out/tree-sitter-yaml.wasm" },
-  ".yml":    { pkg: "tree-sitter-wasms", wasm: "out/tree-sitter-yaml.wasm" },
+  ".yaml":   { pkg: "@tree-sitter-grammars/tree-sitter-yaml", wasm: "tree-sitter-yaml.wasm" },
+  ".yml":    { pkg: "@tree-sitter-grammars/tree-sitter-yaml", wasm: "tree-sitter-yaml.wasm" },
   ".vue":    { pkg: "tree-sitter-wasms", wasm: "out/tree-sitter-vue.wasm" },
 };
 
