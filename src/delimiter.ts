@@ -139,6 +139,7 @@ export function checkDelimiterBalance(path: string, content: string, rules: LexR
       case ")": {
         const top = stack.pop();
         if (!top) return `${path}: stray \`)\` at line ${lineFor(i)} — no matching \`(\` before it`;
+        if (top.ch !== "(") return `${path}: \`)\` at line ${lineFor(i)} doesn't close \`${top.ch}\` at line ${top.line} — expected \`${top.ch === "[" ? "]" : "}"}\``;
         break;
       }
       case "[": {
@@ -149,7 +150,7 @@ export function checkDelimiterBalance(path: string, content: string, rules: LexR
       case "]": {
         const top = stack.pop();
         if (!top) return `${path}: stray \`]\` at line ${lineFor(i)} — no matching \`[\` before it`;
-        if (top.ch !== "[") return `${path}: mismatch at line ${lineFor(i)}: expected \`]\` for \`${top.ch}\` at line ${top.line}`;
+        if (top.ch !== "[") return `${path}: \`]\` at line ${lineFor(i)} doesn't close \`${top.ch}\` at line ${top.line} — expected \`${top.ch === "(" ? ")" : "}"}\``;
         break;
       }
       case "{": {
@@ -160,7 +161,7 @@ export function checkDelimiterBalance(path: string, content: string, rules: LexR
       case "}": {
         const top = stack.pop();
         if (!top) return `${path}: stray \`}\` at line ${lineFor(i)} — no matching \`{\` before it`;
-        if (top.ch !== "{") return `${path}: mismatch at line ${lineFor(i)}: expected \`}\` for \`${top.ch}\` at line ${top.line}`;
+        if (top.ch !== "{") return `${path}: \`}\` at line ${lineFor(i)} doesn't close \`${top.ch}\` at line ${top.line} — expected \`${top.ch === "(" ? ")" : "]"}\``;
         break;
       }
     }

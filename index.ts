@@ -28,6 +28,43 @@ import { Text } from "@earendil-works/pi-tui";
 
 const MAX_ERRORS = 10;
 
+/** Return the line content that contains `offset`, for context. */
+function lineAt(source: string, offset: number): string {
+  const start = source.lastIndexOf("\n", offset - 1) + 1;
+  const end = source.indexOf("\n", offset);
+  return source.slice(start, end === -1 ? source.length : end);
+}
+
+/** Names for anonymous closing-token types that clarify the issue. */
+const CLOSER_LABELS: Record<string, string> = {
+  ")": "parenthesis",
+  "]": "bracket",
+  "}": "brace",
+};
+
+/** Produce a human-readable, context-rich error for one tree-sitter node. */
+function formatError(node: TSNode, source: string): string {
+  const line = node.startPosition.row + 1;
+  const col = node.startPosition.column + 1;
+  const raw = source.slice(node.startIndex, Math.min(node.endIndex, source.length));
+  const snippet = raw.split("\n")[0].slice(0, 80).trimEnd();
+
+  if (node.isMissing) {
+    const label = CLOSER_LABELS[node.type];
+    if (label) {
+      return `Missing \`${node.type}\` — unclosed ${label} at line ${line}:${col}`;
+    }
+    return `Missing \`${node.type}\` at line ${line}:${col}`;
+  }
+
+  // Error node (unexpected token)
+  const label = CLOSER_LABELS[snippet];
+  if (label) {
+    return `Unexpected \`${snippet}\` — extra closing ${label} at line ${line}:${col}`;
+  }
+  return `Unexpected \`${snippet}\` at line ${line}:${col}`;
+}
+
 function collectErrors(tree: Tree, source: string): string[] {
   const errors: string[] = [];
   const stack: TSNode[] = [tree.rootNode];
@@ -35,14 +72,28 @@ function collectErrors(tree: Tree, source: string): string[] {
   while (stack.length > 0 && errors.length < MAX_ERRORS) {
     const node = stack.pop()!;
     if (node.isError || node.isMissing) {
-      const pos = node.startPosition;
-      const raw = source.slice(node.startIndex, Math.min(node.endIndex, source.length));
-      const snippet = raw.split("\n")[0].slice(0, 80).trimEnd();
-      if (node.isMissing) {
-        errors.push("  missing `" + node.type + "` at " + (pos.row + 1) + ":" + (pos.column + 1) + ": " + snippet);
-      } else {
-        errors.push("  syntax error at " + (pos.row + 1) + ":" + (pos.column + 1) + ": " + snippet);
+      // ERROR nodes can span a large region with more specific
+      // error/missing children inside.  Descend to find the narrowest
+      // error — the child will have a better position and snippet.
+      if (node.isError && !node.isMissing) {
+        let hasSpecificChild = false;
+        for (let i = 0; i < node.childCount; i++) {
+          const c = node.child(i);
+          if (c.isError || c.isMissing) { hasSpecificChild = true; break; }
+        }
+        if (hasSpecificChild) {
+          for (let i = node.childCount - 1; i >= 0; i--) stack.push(node.child(i));
+          continue;
+        }
       }
+      const msg = formatError(node, source);
+      const offset = node.startIndex;
+      const ctxLine = lineAt(source, offset);
+      const lineStart = source.lastIndexOf("\n", offset) + 1;
+      const col = offset - lineStart;
+      const pointer = " ".repeat(Math.max(0, col)) + "^";
+      const lineNum = node.startPosition.row + 1;
+      errors.push("  " + msg + "\n    |\n    " + lineNum + " | " + ctxLine + "\n    | " + pointer);
       continue;
     }
     const children = node.children;
