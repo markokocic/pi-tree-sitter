@@ -51,10 +51,22 @@ function collectErrors(tree: Tree, source: string): string[] {
   return errors;
 }
 
-/** Validate content for write/edit blocking. Returns null = clean. */
+/**
+ * Validate content for write/edit blocking. Returns null = clean.
+ *
+ * For Lisp-like languages (Clojure, Scheme, Elisp, etc.) the delimiter
+ * balance scanner serves as a second-opinion sanity check: tree-sitter
+ * grammars can produce false positives on valid code (e.g. Java interop
+ * like `(StringBuilder.)`), but a file with correct delimiter balance
+ * is structurally sound.  When both checks are available, we only block
+ * if both agree there's a problem — this prevents false positives while
+ * still catching unbalanced delimiters.
+ */
 async function validateContent(path: string, content: string, notify?: NotifyFn): Promise<string | null> {
   const ext = path.match(/\.[^.]+$/)?.[0]?.toLowerCase();
   if (!ext) return null;
+
+  const rules = ext ? BALANCE_RULES[ext] : undefined;
 
   const entry = LANGUAGE_MAP[ext];
   if (entry) {
@@ -67,6 +79,25 @@ async function validateContent(path: string, content: string, notify?: NotifyFn)
       if (tree && tree.rootNode.hasError) {
         const errors = collectErrors(tree, content);
         if (errors.length > 0) {
+          // Grammar reports errors — run delimiter balance as second opinion
+          if (rules) {
+            const balanceErr = checkDelimiterBalance(path, content, rules);
+            if (balanceErr === null) {
+              // Delimiters are balanced — grammar likely producing a false
+              // positive (e.g. Java interop in Clojure). Warn but don't block.
+              return null;
+            }
+            // Both grammar and delimiter check agree — block with combined message
+            let msg = "Syntax check failed for " + path + ": " + errors.length + " error(s) detected by tree-sitter.\n";
+            msg += "Delimiter balance also reports issues:\n  " + balanceErr + "\n";
+            msg += "Fix and re-submit. (This is a pre-write guard \u2014 the file was NOT modified.)\n";
+            msg += errors.join("\n");
+            if (errors.length >= MAX_ERRORS) {
+              msg += "\n  \u2026(truncated at " + MAX_ERRORS + " errors; fix the listed issues and re-check)";
+            }
+            return msg;
+          }
+          // No delimiter rules for this extension — trust the grammar
           let msg = "Syntax check failed for " + path + ": " + errors.length + " error(s) detected by tree-sitter.\n";
           msg += "Fix and re-submit. (This is a pre-write guard \u2014 the file was NOT modified.)\n";
           msg += errors.join("\n");
@@ -82,7 +113,6 @@ async function validateContent(path: string, content: string, notify?: NotifyFn)
     // Grammar not available — fall through to delimiter balance if rules exist
   }
 
-  const rules = ext ? BALANCE_RULES[ext] : undefined;
   if (rules) {
     const err = checkDelimiterBalance(path, content, rules);
     if (err) {
