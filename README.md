@@ -71,7 +71,7 @@ Fix and re-submit. (This is a pre-write guard — the file was NOT modified.)
   syntax error at 15:8: let x =
 ```
 
-For `edit` tools, the extension reads the current file, applies the edits, and validates the result. For languages without WASM grammars, a comment/string-aware delimiter-balance scanner provides fallback validation.
+For `edit` tools, the extension runs the edit tool's own execution in memory (file operations redirected) and validates the result — so the guard always checks exactly what the tool would write. If an `oldText` matched only a prefix of a line — leaving trailing characters behind after the replacement, a common cause of rejected edits — the block message names that edit and line instead of only showing the resulting syntax error. Edits the edit tool itself would reject with a precise error (text not found, non-unique, overlapping) are left for the tool to report. For languages without WASM grammars, a comment/string-aware delimiter-balance scanner provides fallback validation.
 
 ## Languages
 
@@ -157,6 +157,7 @@ pi-tree-sitter/
   src/
     grammar.ts       # LANGUAGE_MAP, WASM loading from CDN, disk cache with ETag
     delimiter.ts     # Comment/string-aware delimiter balance scanner (fallback)
+    edit-guard.ts    # In-memory edit simulation via the tool's own execute + prefix-match diagnosis
     languages.ts     # 21 per-language configs: extractors + callee queries
     files.ts         # Recursive project file discovery
 ```

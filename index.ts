@@ -11,7 +11,7 @@
  * Inspired by dirge's syntax_validator.rs and semantic adapters.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { highlightCode, getLanguageFromPath } from "@earendil-works/pi-coding-agent";
+import { highlightCode, getLanguageFromPath, isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -19,6 +19,7 @@ import { Parser, type Tree, type Node as TSNode } from "web-tree-sitter";
 
 import { ensureParser, loadGrammar, LANGUAGE_MAP, type NotifyFn } from "./src/grammar.js";
 import { BALANCE_RULES, checkDelimiterBalance } from "./src/delimiter.js";
+import { describePrefixLeftover, findPrefixLeftover, simulateEditContent } from "./src/edit-guard.js";
 import type { Symbol as Sym, ExtractedFile, LangConfig } from "./src/languages.js";
 import { configForExt, configForFile } from "./src/languages.js";
 import { findProjectFiles, readFileSafe } from "./src/files.js";
@@ -275,23 +276,28 @@ export default async function (pi: ExtensionAPI) {
       return;
     }
 
-    if (event.toolName === "edit") {
-      const input = event.input as {
-        path: string;
-        edits: Array<{ oldText: string; newText: string }>;
-      };
+    if (isToolCallEventType("edit", event)) {
+      const input = event.input;
       if (!input.edits || input.edits.length === 0) return;
       const absolutePath = resolve(ctx.cwd, input.path);
       try {
         const rawContent = await readFile(absolutePath, "utf-8");
-        let result = rawContent;
-        for (const edit of input.edits) {
-          const idx = result.indexOf(edit.oldText);
-          if (idx === -1) continue;
-          result = result.slice(0, idx) + edit.newText + result.slice(idx + edit.oldText.length);
+        // Run the edit tool's own execute with file operations redirected to
+        // memory: we validate exactly the content the tool would write.
+        const proposed = await simulateEditContent(rawContent, input.path, input.edits, ctx.cwd, ctx);
+        // The tool itself would fail the call with a precise error (text not
+        // found, non-unique, overlapping, empty oldText, no change) — stay
+        // silent and let the tool report it.
+        if (proposed === null) return;
+        const err = await validateContent(input.path, proposed, notify);
+        if (err) {
+          // If an oldText matched only a prefix of a line, the leftover
+          // characters after the replacement are the likely cause of the
+          // syntax error — say so instead of only showing the symptom.
+          const leftover = findPrefixLeftover(rawContent, input.edits);
+          const cause = leftover ? describePrefixLeftover(leftover) + "\n\n" : "";
+          return { block: true, reason: cause + err };
         }
-        const err = await validateContent(input.path, result, notify);
-        if (err) return { block: true, reason: err };
       } catch {
         // File doesn't exist — let edit tool handle the error
       }
